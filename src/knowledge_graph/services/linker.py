@@ -4,6 +4,7 @@ Automatically creates knowledge graph links using embeddings and LLM-based analy
 """
 
 import numpy as np
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import structlog
@@ -143,26 +144,33 @@ class SemanticLinker:
         return relations
     
     def _extract_concepts_from_text(self, text: str) -> List[str]:
-        """Extract key concepts from text using LLM."""
+        """Extract key concepts from text using the Anthropic API.
+
+        Expects self.llm_client to be an anthropic.Anthropic() instance.
+        Uses claude-haiku-4-5 (fast, cheap) for extraction.
+        """
         if not self.llm_client:
             return []
-        
+
         try:
-            # This is a simplified version - in production would use proper async
-            prompt = f"""Extract the 3-5 most important concepts from the following text.
-Return only a comma-separated list of concept names.
-
-Text: {text[:1000]}
-
-Concepts:"""
-            
-            # Placeholder for actual LLM call
-            # response = await self.llm_client.chat_completion(...)
-            # For now, return empty list
-            return []
-            
+            response = self.llm_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Extract 3-5 key concepts from the text below. "
+                            "Return ONLY a comma-separated list of concept names, nothing else.\n\n"
+                            f"Text: {text[:1000]}"
+                        ),
+                    }
+                ],
+            )
+            raw = response.content[0].text.strip()
+            return [c.strip() for c in raw.split(",") if c.strip()]
         except Exception as e:
-            logger.error("Failed to extract concepts", error=str(e))
+            logger.error("Failed to extract concepts via Claude API", error=str(e))
             return []
     
     def link_related_tasks(self, task_entity_id: str) -> List[Relation]:
@@ -209,9 +217,7 @@ Concepts:"""
                 similarity += 0.1
             
             if task_entity.source_file_path and other_task.source_file_path:
-                path1 = task_entity.source_file_path
-                path2 = other_task.source_file_path
-                if path1.parent == path2.parent:
+                if Path(task_entity.source_file_path).parent == Path(other_task.source_file_path).parent:
                     similarity += 0.2
             
             # Create relation if similarity is high enough

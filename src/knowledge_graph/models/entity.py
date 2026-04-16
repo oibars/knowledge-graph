@@ -26,6 +26,12 @@ RELATION_TYPES = {
     "uses": "Utilization relationship",
     "produces": "Output relationship",
     "influenced_by": "Inspiration or derivation",
+    # Agent/session relations
+    "routed_to": "Task routed to this agent",
+    "spawned_by": "Agent or session that created this",
+    "resolves": "Fixes or addresses this entity",
+    "supersedes": "Replaces a prior decision or entity",
+    "tracked_in": "Monitored or managed in this system",
 }
 
 
@@ -42,6 +48,13 @@ ENTITY_LABELS = {
     "Code": "Code snippet or module",
     "Event": "Temporal occurrence",
     "Tag": "Categorical label",
+    # Claude Code / agent memory labels
+    "Agent": "Claude Code agent persona",
+    "Session": "Claude Code conversation session",
+    "Decision": "Architectural or product decision",
+    "Experiment": "loop-optimize iteration result",
+    "AgentOutput": "Artifact produced by an agent invocation",
+    "Bug": "Known defect with investigation state",
 }
 
 
@@ -83,9 +96,12 @@ class Entity:
     updated_at: datetime = field(default_factory=datetime.now)
     last_accessed: Optional[datetime] = None
     access_count: int = 0
-    
+
     # Content hash for deduplication
     content_hash: Optional[str] = None
+
+    # Whether this entity was created automatically (vs. by a human)
+    is_auto_generated: bool = False
     
     def __post_init__(self):
         """Generate content hash if not provided."""
@@ -102,7 +118,7 @@ class Entity:
             "description": self.description,
             "properties": self.properties,
             "embedding": self.embedding,
-            "topics": self.tags,
+            "topics": self.topics,
             "tags": self.tags,
             "source_url": self.source_url,
             "source_file_path": self.source_file_path,
@@ -115,6 +131,7 @@ class Entity:
             "last_accessed": self.last_accessed.isoformat() if self.last_accessed else None,
             "access_count": self.access_count,
             "content_hash": self.content_hash,
+            "is_auto_generated": self.is_auto_generated,
         }
     
     @classmethod

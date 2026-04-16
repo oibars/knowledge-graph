@@ -32,7 +32,7 @@ class KnowledgeGraphStore:
     
     def __init__(
         self,
-        data_dir: str = "/home/oscr/Apps/swisspy/data",
+        data_dir: str = str(Path.home() / ".knowledge-graph" / "data"),
         db_name: str = "knowledge_graph.db",
         enable_snapshots: bool = True
     ):
@@ -92,9 +92,16 @@ class KnowledgeGraphStore:
                 updated_at TEXT,
                 last_accessed TEXT,
                 access_count INTEGER DEFAULT 0,
-                content_hash TEXT
+                content_hash TEXT,
+                is_auto_generated INTEGER DEFAULT 0
             )
         """)
+
+        # Migration: add is_auto_generated if upgrading from older schema
+        try:
+            cursor.execute("ALTER TABLE entities ADD COLUMN is_auto_generated INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         
         # Relations table
         cursor.execute("""
@@ -188,7 +195,8 @@ class KnowledgeGraphStore:
             updated_at=datetime.fromisoformat(row[15]) if row[15] else datetime.now(),
             last_accessed=datetime.fromisoformat(row[16]) if row[16] else None,
             access_count=row[17] or 0,
-            content_hash=row[18]
+            content_hash=row[18],
+            is_auto_generated=bool(row[19]) if len(row) > 19 else False,
         )
     
     def _row_to_relation(self, row) -> Relation:
@@ -228,7 +236,8 @@ class KnowledgeGraphStore:
             entity.updated_at.isoformat(),
             entity.last_accessed.isoformat() if entity.last_accessed else None,
             entity.access_count,
-            entity.content_hash
+            entity.content_hash,
+            int(entity.is_auto_generated),
         )
     
     def _relation_to_row(self, relation: Relation) -> tuple:
@@ -268,7 +277,7 @@ class KnowledgeGraphStore:
         
         cursor.execute("""
             INSERT OR REPLACE INTO entities VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, self._entity_to_row(entity))
         
@@ -420,9 +429,21 @@ class KnowledgeGraphStore:
         return True
     
     def _update_entity_access(self, entity: Entity):
-        """Update entity access metadata in database (async)."""
-        # Batch updates or background task
-        pass
+        """Persist access metadata (last_accessed, access_count) to SQLite."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.execute(
+                "UPDATE entities SET last_accessed=?, access_count=? WHERE id=?",
+                (
+                    entity.last_accessed.isoformat() if entity.last_accessed else None,
+                    entity.access_count,
+                    entity.id,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Failed to persist entity access metadata", entity_id=entity.id, error=str(e))
     
     # ========================================================================
     # Query Operations
@@ -769,7 +790,7 @@ class KnowledgeGraphStore:
             
             for entity in self._entities.values():
                 cursor.execute(
-                    "INSERT INTO entities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO entities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._entity_to_row(entity)
                 )
             
