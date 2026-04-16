@@ -12,13 +12,13 @@ Usage:
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
 import structlog
 
 from knowledge_graph.models import Entity
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
+from knowledge_graph.services.linker import _ollama_embed, _OLLAMA_EMBED_MODEL, _OLLAMA_URL
 
 logger = structlog.get_logger()
 
@@ -47,6 +47,7 @@ def index_agents(
     agents_dir: Path = DEFAULT_AGENTS_DIR,
     store: KnowledgeGraphStore | None = None,
     dry_run: bool = False,
+    generate_embeddings: bool = True,
 ) -> tuple[int, int]:
     """Index all agent .md files from agents_dir into the knowledge graph.
 
@@ -107,6 +108,14 @@ def index_agents(
         parts = md_file.stem.split("-")
         category_tag = parts[0] if parts else "uncategorized"
 
+        # Generate embedding via Ollama (local, 5090) for semantic search
+        embedding = None
+        if generate_embeddings:
+            embed_text = f"{name}: {description}" if description else name
+            embedding = _ollama_embed(embed_text, _OLLAMA_EMBED_MODEL, _OLLAMA_URL)
+            if embedding is None:
+                logger.debug("Ollama embedding unavailable, skipping", agent=entity_id)
+
         entity = Entity(
             id=entity_id,
             label="Agent",
@@ -118,10 +127,12 @@ def index_agents(
             importance_score=0.6,
             is_auto_generated=True,
             content_hash=content_hash,
+            embedding=embedding,
         )
 
         store.add_entity(entity)
-        logger.info("Indexed agent", id=entity_id, name=name, category=category_tag)
+        embed_status = "embedded" if embedding else "no-embedding"
+        logger.info("Indexed agent", id=entity_id, name=name, category=category_tag, embedding=embed_status)
         added += 1
 
     return added, skipped
@@ -140,10 +151,19 @@ def main() -> None:
         action="store_true",
         help="Parse agents and report without writing to the graph",
     )
+    parser.add_argument(
+        "--no-embeddings",
+        action="store_true",
+        help="Skip Ollama embedding generation (faster, but disables semantic similarity search)",
+    )
     args = parser.parse_args()
 
     print(f"Scanning: {args.agents_dir}")
-    added, skipped = index_agents(agents_dir=args.agents_dir, dry_run=args.dry_run)
+    added, skipped = index_agents(
+        agents_dir=args.agents_dir,
+        dry_run=args.dry_run,
+        generate_embeddings=not args.no_embeddings,
+    )
     print(f"Done — added: {added}, skipped: {skipped}")
 
 

@@ -1,8 +1,21 @@
 """
 Semantic Linker Service
 Automatically creates knowledge graph links using embeddings and LLM-based analysis.
+
+Supports two backends (configured via constructor or environment variables):
+  - Ollama (default, local, 5090): zero API cost, uses local models
+  - Anthropic (optional): requires ANTHROPIC_API_KEY, uses claude-haiku
+
+Environment variables (all optional):
+  OLLAMA_URL          Ollama base URL (default: http://localhost:11434)
+  OLLAMA_EMBED_MODEL  Embedding model (default: nomic-embed-text)
+  OLLAMA_CHAT_MODEL   Chat model for concept extraction (default: gemma4:e4b)
 """
 
+import json
+import os
+import urllib.error
+import urllib.request
 import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -14,39 +27,88 @@ from knowledge_graph.services.graph_store import KnowledgeGraphStore
 
 logger = structlog.get_logger()
 
+_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+_OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+_OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "gemma4:e4b")
+
+
+def _ollama_embed(text: str, model: str = _OLLAMA_EMBED_MODEL, base_url: str = _OLLAMA_URL) -> Optional[List[float]]:
+    """Generate an embedding via Ollama. Returns None if Ollama is unreachable."""
+    try:
+        payload = json.dumps({"model": model, "prompt": text}).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/embeddings",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())["embedding"]
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError) as e:
+        logger.warning("Ollama embedding failed", model=model, error=str(e))
+        return None
+
+
+def _ollama_generate(prompt: str, model: str = _OLLAMA_CHAT_MODEL, base_url: str = _OLLAMA_URL) -> Optional[str]:
+    """Run a one-shot generation via Ollama. Returns None if Ollama is unreachable."""
+    try:
+        payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read()).get("response", "").strip()
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        logger.warning("Ollama generate failed", model=model, error=str(e))
+        return None
+
 
 class SemanticLinker:
     """
     Creates semantic links between entities in the knowledge graph.
-    
-    Uses embeddings for similarity-based linking and can leverage LLM
-    for concept extraction and relationship inference.
+
+    Embedding and concept extraction backend priority:
+      1. Ollama (local, default) — zero cost, uses 5090
+      2. sentence-transformers embedding_model (if provided)
+      3. Anthropic llm_client (if provided, for concept extraction only)
     """
-    
+
     def __init__(
         self,
         graph_store: KnowledgeGraphStore,
         embedding_model=None,
         llm_client=None,
-        similarity_threshold: float = 0.7
+        similarity_threshold: float = 0.7,
+        ollama_url: str = _OLLAMA_URL,
+        ollama_embed_model: str = _OLLAMA_EMBED_MODEL,
+        ollama_chat_model: str = _OLLAMA_CHAT_MODEL,
+        use_ollama: bool = True,
     ):
         self.graph = graph_store
         self.embedding_model = embedding_model
         self.llm_client = llm_client
         self.similarity_threshold = similarity_threshold
-    
+        self.ollama_url = ollama_url
+        self.ollama_embed_model = ollama_embed_model
+        self.ollama_chat_model = ollama_chat_model
+        self.use_ollama = use_ollama
+
     def _compute_embedding(self, text: str) -> Optional[List[float]]:
-        """Compute embedding for text using the configured model."""
-        if not self.embedding_model:
-            return None
-        
-        try:
-            # Assuming embedding_model is compatible with sentence-transformers interface
-            embedding = self.embedding_model.encode(text)
-            return embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
-        except Exception as e:
-            logger.error("Failed to compute embedding", text=text[:50], error=str(e))
-            return None
+        """Compute embedding. Tries Ollama first, then sentence-transformers."""
+        if self.use_ollama:
+            emb = _ollama_embed(text, self.ollama_embed_model, self.ollama_url)
+            if emb is not None:
+                return emb
+
+        if self.embedding_model:
+            try:
+                embedding = self.embedding_model.encode(text)
+                return embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+            except Exception as e:
+                logger.error("sentence-transformers embedding failed", text=text[:50], error=str(e))
+
+        return None
     
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """Compute cosine similarity between two vectors."""
@@ -144,34 +206,35 @@ class SemanticLinker:
         return relations
     
     def _extract_concepts_from_text(self, text: str) -> List[str]:
-        """Extract key concepts from text using the Anthropic API.
+        """Extract key concepts. Tries Ollama (local) first, then Anthropic API fallback."""
+        prompt = (
+            "Extract 3-5 key concepts from the text below. "
+            "Return ONLY a comma-separated list of concept names, nothing else.\n\n"
+            f"Text: {text[:1000]}"
+        )
 
-        Expects self.llm_client to be an anthropic.Anthropic() instance.
-        Uses claude-haiku-4-5 (fast, cheap) for extraction.
-        """
-        if not self.llm_client:
-            return []
+        # 1. Try Ollama (local, zero API cost)
+        if self.use_ollama:
+            raw = _ollama_generate(prompt, self.ollama_chat_model, self.ollama_url)
+            if raw:
+                concepts = [c.strip() for c in raw.split(",") if c.strip()]
+                if concepts:
+                    return concepts
 
-        try:
-            response = self.llm_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=200,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Extract 3-5 key concepts from the text below. "
-                            "Return ONLY a comma-separated list of concept names, nothing else.\n\n"
-                            f"Text: {text[:1000]}"
-                        ),
-                    }
-                ],
-            )
-            raw = response.content[0].text.strip()
-            return [c.strip() for c in raw.split(",") if c.strip()]
-        except Exception as e:
-            logger.error("Failed to extract concepts via Claude API", error=str(e))
-            return []
+        # 2. Fallback: Anthropic API (requires llm_client)
+        if self.llm_client:
+            try:
+                response = self.llm_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = response.content[0].text.strip()
+                return [c.strip() for c in raw.split(",") if c.strip()]
+            except Exception as e:
+                logger.error("Failed to extract concepts via Anthropic API", error=str(e))
+
+        return []
     
     def link_related_tasks(self, task_entity_id: str) -> List[Relation]:
         """

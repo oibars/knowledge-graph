@@ -15,7 +15,7 @@ def store(tmp_path):
 
 @pytest.fixture
 def linker(store):
-    return SemanticLinker(store)
+    return SemanticLinker(store, use_ollama=False)
 
 
 @pytest.fixture
@@ -25,7 +25,8 @@ def linker_with_llm(store):
     mock_response = MagicMock()
     mock_response.content = [MagicMock(text="authentication, JWT, session management")]
     mock_client.messages.create.return_value = mock_response
-    return SemanticLinker(store, llm_client=mock_client)
+    # Disable Ollama so the mock LLM fallback is used
+    return SemanticLinker(store, llm_client=mock_client, use_ollama=False)
 
 
 class TestExtractConcepts:
@@ -42,7 +43,7 @@ class TestExtractConcepts:
     def test_llm_api_error_returns_empty(self, store):
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = Exception("API error")
-        linker = SemanticLinker(store, llm_client=mock_client)
+        linker = SemanticLinker(store, llm_client=mock_client, use_ollama=False)
         result = linker._extract_concepts_from_text("Some text")
         assert result == []
 
