@@ -48,6 +48,7 @@ def index_agents(
     store: KnowledgeGraphStore | None = None,
     dry_run: bool = False,
     generate_embeddings: bool = True,
+    force: bool = False,
 ) -> tuple[int, int]:
     """Index all agent .md files from agents_dir into the knowledge graph.
 
@@ -99,7 +100,7 @@ def index_agents(
         import hashlib
         content_hash = hashlib.sha256(combined.encode()).hexdigest()[:16]
 
-        if existing and existing.content_hash == content_hash:
+        if existing and existing.content_hash == content_hash and not force:
             logger.debug("Agent already indexed, skipping", agent=entity_id)
             skipped += 1
             continue
@@ -156,6 +157,11 @@ def main() -> None:
         action="store_true",
         help="Skip Ollama embedding generation (faster, but disables semantic similarity search)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-index all agents even if content hash is unchanged (useful to regenerate embeddings)",
+    )
     args = parser.parse_args()
 
     print(f"Scanning: {args.agents_dir}")
@@ -163,6 +169,7 @@ def main() -> None:
         agents_dir=args.agents_dir,
         dry_run=args.dry_run,
         generate_embeddings=not args.no_embeddings,
+        force=args.force,
     )
     print(f"Done — added: {added}, skipped: {skipped}")
 
