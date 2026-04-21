@@ -23,6 +23,13 @@ dependencies = [
 anthropic = [
     "anthropic>=0.52.0",  # fallback for concept extraction when Ollama unavailable
 ]
+reddit = [
+    "praw>=7.7",
+]
+youtube = [
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
@@ -32,6 +39,7 @@ dev = [
 kg-mcp = "knowledge_graph.mcp_server:main"
 kg-index-agents = "knowledge_graph.agent_indexer:main"
 kg-index-sources = "knowledge_graph.source_indexer:main"
+kg-ingest-bookmarks = "knowledge_graph.bookmarks_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/knowledge_graph"]
