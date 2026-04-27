@@ -25,16 +25,17 @@ from typing import Iterator
 from knowledge_graph.ingesters.common import BookmarkRecord
 
 
-REQUIRED_ENV = [
-    "REDDIT_CLIENT_ID",
-    "REDDIT_CLIENT_SECRET",
-    "REDDIT_USERNAME",
-    "REDDIT_PASSWORD",
-]
+REQUIRED_BASE = ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]
+PASSWORD_GRANT = ["REDDIT_USERNAME", "REDDIT_PASSWORD"]
 
 
 def missing_env() -> list[str]:
-    return [k for k in REQUIRED_ENV if not os.environ.get(k)]
+    base_missing = [k for k in REQUIRED_BASE if not os.environ.get(k)]
+    if base_missing:
+        return base_missing
+    if os.environ.get("REDDIT_REFRESH_TOKEN"):
+        return []
+    return [k for k in PASSWORD_GRANT if not os.environ.get(k)]
 
 
 def read_reddit_saved(limit: int = 1000) -> Iterator[BookmarkRecord]:
@@ -52,13 +53,19 @@ def read_reddit_saved(limit: int = 1000) -> Iterator[BookmarkRecord]:
             f"Missing Reddit env vars: {', '.join(missing)}. See reddit.py docstring."
         )
 
-    reddit = praw.Reddit(
+    common = dict(
         client_id=os.environ["REDDIT_CLIENT_ID"],
         client_secret=os.environ["REDDIT_CLIENT_SECRET"],
-        username=os.environ["REDDIT_USERNAME"],
-        password=os.environ["REDDIT_PASSWORD"],
         user_agent=os.environ.get("REDDIT_USER_AGENT", "knowledge-graph/1.0"),
     )
+    if refresh := os.environ.get("REDDIT_REFRESH_TOKEN"):
+        reddit = praw.Reddit(refresh_token=refresh, **common)
+    else:
+        reddit = praw.Reddit(
+            username=os.environ["REDDIT_USERNAME"],
+            password=os.environ["REDDIT_PASSWORD"],
+            **common,
+        )
 
     redditor = reddit.user.me()
     for item in redditor.saved(limit=limit):
