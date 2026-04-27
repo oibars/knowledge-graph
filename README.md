@@ -1,48 +1,51 @@
-# Knowledge Graph
+# knowledge-graph
 
-Hybrid knowledge graph library for AI agent memory. NetworkX for in-memory graph operations, SQLite for persistence. Exposes an MCP server so Claude Code agents can store and retrieve context across sessions.
+Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool — not a notebook you maintain.
 
-## Features
+**Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Claude Code, Cursor, or any MCP client gets your saved-content context preloaded as a tool.
 
-- Entity/Relation CRUD with typed models and controlled vocabularies
-- Graph traversal (shortest path, neighbors, subgraph extraction)
-- Semantic linking via embeddings (cosine similarity)
-- LLM-powered concept extraction via Claude API (`claude-haiku-4-5`)
-- SQLite persistence with snapshot support
-- FastAPI routes for HTTP access
-- **MCP server** — queryable by Claude Code agents via `kg_search`, `kg_add_entity`, `kg_add_relation`, etc.
-- **Agent indexer** — indexes `~/.claude/agents/*.md` as `Entity(label="Agent")` for semantic routing
+- **Local-first** — runs on your machine, no cloud, no login, no telemetry
+- **MCP-native** — exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors`, etc. so AI agents reach for it as a tool
+- **No notes required** — the ingest pipeline does the work, you just keep saving things normally
+- **Deterministic relevance scoring** — lexical interest profile from your own files + graph entities, no LLM call needed
+
+## What it ingests
+
+| Source | Auth | Status |
+|---|---|---|
+| Chrome bookmarks | none (local file) | working |
+| Firefox bookmarks | none (local file) | working |
+| Reddit saves | OAuth refresh-token (SSO-compatible helper included) | working |
+| YouTube likes + watch-later | Google OAuth (one-time consent) | working |
+| Instagram saved posts/reels | Meta data export ZIP | working |
+| Article / PDF / podcast / paper | manual capture via skill or template | working |
+
+Every item lands as `Entity(label="Document")` with an `importance_score` (0.0–1.0) and a `signal-high | signal-medium | signal-low` tag. Re-runs are idempotent (content_hash dedup).
 
 ## Install
 
 ```bash
-pip install -e .
-# or with uv
-uv pip install -e .
+git clone https://github.com/oibars/knowledge-graph.git
+cd knowledge-graph
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[reddit,youtube]"   # extras optional per source
 ```
 
-## MCP Server (Claude Code integration)
+Requires Python ≥ 3.11.
 
-Start the MCP server:
+## MCP server (Claude Code / Cursor / Claude Desktop)
 
 ```bash
-python -m knowledge_graph.mcp_server
-# or after install:
 kg-mcp
 ```
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude/settings.json` (or your client's MCP config):
 
 ```json
 {
   "mcpServers": {
     "knowledge-graph": {
-      "command": "python",
-      "args": ["-m", "knowledge_graph.mcp_server"],
-      "cwd": "/path/to/knowledge-graph",
-      "env": {
-        "KG_DATA_DIR": "/home/youruser/.knowledge-graph/data"
-      }
+      "command": "kg-mcp"
     }
   }
 }
@@ -50,112 +53,150 @@ Add to `~/.claude/settings.json`:
 
 ### Available MCP tools
 
-| Tool | Description |
-|------|-------------|
-| `kg_search` | Search entities by text query, with optional label filter |
-| `kg_get_entity` | Retrieve a single entity by ID |
-| `kg_get_neighbors` | Get neighboring entities at depth 1-3 |
-| `kg_find_path` | Find shortest path between two entities |
+| Tool | Purpose |
+|---|---|
+| `kg_search` | Search entities by text, optional `label` filter |
+| `kg_get_entity` | Retrieve an entity by id |
+| `kg_get_neighbors` | Neighbors at depth 1–3 |
+| `kg_find_path` | Shortest path between two entities |
 | `kg_get_stats` | Graph statistics |
-| `kg_add_entity` | Create a new entity |
-| `kg_add_relation` | Link two entities with a typed relation |
-| `kg_update_entity` | Update fields on an existing entity |
-| `kg_delete_entity` | Delete an entity and its relations |
+| `kg_add_entity` | Create entity |
+| `kg_add_relation` | Link two entities |
+| `kg_update_entity` | Update fields |
+| `kg_delete_entity` | Delete entity + relations |
 
-### Entity labels
-
-`Concept` `Task` `Decision` `Bug` `Agent` `Session` `AgentOutput` `Experiment`
-`Document` `Code` `File` `Folder` `Person` `Skill` `Tool` `Event` `Tag`
-
-### Relation types
-
-`contains` `depends_on` `implements` `references` `similar_to` `contradicts`
-`prerequisite_for` `learned_from` `authored_by` `located_in` `part_of` `uses`
-`produces` `influenced_by` `routed_to` `spawned_by` `resolves` `supersedes` `tracked_in`
-
-## Agent Indexer
-
-Index all installed Claude Code agents as `Agent` entities for semantic routing:
+## Ingest your saves
 
 ```bash
-python -m knowledge_graph.agent_indexer
-# or after install:
+# Run all locally-available sources
+kg-ingest-bookmarks
+
+# One source at a time
+kg-ingest-bookmarks --source chrome
+kg-ingest-bookmarks --source firefox
+kg-ingest-bookmarks --source reddit       # needs Reddit env vars (see below)
+kg-ingest-bookmarks --source youtube      # needs Google OAuth client (see below)
+kg-ingest-bookmarks --source instagram --path ~/Downloads/meta_export.zip
+
+# Inspect the interest profile that drives scoring
+kg-ingest-bookmarks --show-profile
+
+# Score-only, no DB writes
+kg-ingest-bookmarks --source chrome --dry-run
+```
+
+### Reddit setup (OAuth refresh-token, works with Google-SSO accounts)
+
+1. Create a "script"-type app at https://www.reddit.com/prefs/apps with redirect URI `http://localhost:8080`
+2. Set in your shell env:
+   ```
+   REDDIT_CLIENT_ID
+   REDDIT_CLIENT_SECRET
+   REDDIT_USER_AGENT="knowledge-graph/1.0 by <username>"
+   ```
+3. One-time OAuth dance to get a permanent refresh-token (no Reddit password needed):
+   ```bash
+   python scripts/reddit_oauth_setup.py
+   ```
+   Click Allow in the browser. The script prints the line to add:
+   ```
+   set -gx REDDIT_REFRESH_TOKEN "<token>"
+   ```
+4. Then `kg-ingest-bookmarks --source reddit`.
+
+If you have a Reddit-native password, set `REDDIT_USERNAME` and `REDDIT_PASSWORD` instead and skip step 3.
+
+### YouTube setup
+
+1. Google Cloud Console → enable "YouTube Data API v3"
+2. Create an OAuth 2.0 Desktop client → download JSON → save to `~/.config/google/youtube_oauth_client.json`
+3. Add yourself as a Test user on the OAuth consent screen
+4. Run `kg-ingest-bookmarks --source youtube` — first run opens browser for consent, token caches at `~/.config/google/youtube_token.json`, subsequent runs are silent
+
+### Instagram setup
+
+Request a Meta data export (Account Center → Your info & permissions → Download your information → JSON, "Saved posts + Saved reels"). Meta emails the link within 48h. Then:
+
+```bash
+kg-ingest-bookmarks --source instagram --path ~/Downloads/meta_export.zip
+```
+
+## Capture a single source (article, PDF, podcast)
+
+For deliberate captures with a written thesis instead of bulk firehose ingest, use the `capture-source` skill (`~/.claude/skills/capture-source/SKILL.md`) or copy `sources/_TEMPLATE.md` and run:
+
+```bash
+kg-index-sources
+```
+
+Each capture produces `Entity(Document)` + one `Entity(Concept)` per claim + author `Entity(Person)` + `[[wikilink]]` references.
+
+## Index installed Claude Code agents
+
+```bash
 kg-index-agents
-
-# Custom agents directory
 kg-index-agents --agents-dir /path/to/agents
-
-# Preview without writing
 kg-index-agents --dry-run
 ```
 
-After indexing, agents are searchable via MCP:
+After indexing, agents are searchable as a routing layer:
 
 ```
 kg_search("debug a production memory leak", label="Agent")
-→ Returns: engineering-incident-response-commander, engineering-sre, testing-evidence-collector...
+→ engineering-incident-response-commander, engineering-sre, testing-evidence-collector
 ```
 
 ## Python API
 
 ```python
-from knowledge_graph.models import Entity, Relation
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
-from knowledge_graph.services.linker import SemanticLinker
-import anthropic
+from knowledge_graph.models import Entity, Relation
 
-# Default data dir: ~/.knowledge-graph/data
-store = KnowledgeGraphStore()
+store = KnowledgeGraphStore()  # ~/.knowledge-graph/data by default
 
-# Add entities
-entity = Entity(id="e1", label="Concept", name="Authentication", tags=["security"])
-store.add_entity(entity)
+store.add_entity(Entity(id="e1", label="Concept", name="Authentication", tags=["security"]))
+store.add_relation(Relation(id="r1", source_id="e1", target_id="e2", relation_type="depends_on"))
 
-# Add relations
-rel = Relation(id="r1", source_id="e1", target_id="e2", relation_type="depends_on")
-store.add_relation(rel)
-
-# Search
 results = store.search_entities("authentication security")
-
-# Semantic linking with Claude API
-linker = SemanticLinker(store, llm_client=anthropic.Anthropic())
-linker.link_file_to_concepts("e1", extract_concepts=True)
-
-# Graph algorithms
 path = store.find_path("e1", "e5")
 neighbors = store.get_neighbors("e1", depth=2)
-centrality = store.get_centrality("e1", metric="pagerank")
 ```
 
-## FastAPI Routes
+## Entity labels
 
-Mount the HTTP router in your FastAPI app:
+`Concept` `Document` `Person` `Tag` `File` `Folder` `Agent` `Skill` `Tool` `Decision` `Task` `Bug` `Session` `AgentOutput` `Experiment` `Code` `Event`
 
-```python
-from knowledge_graph.routes.knowledge import router
-app.include_router(router, prefix="/knowledge")
-```
+## Relation types
+
+`contains` `depends_on` `implements` `references` `similar_to` `contradicts` `prerequisite_for` `learned_from` `authored_by` `located_in` `part_of` `uses` `produces` `influenced_by` `routed_to` `spawned_by` `resolves` `supersedes` `tracked_in`
 
 ## Configuration
 
-| Env var | Default | Description |
-|---------|---------|-------------|
-| `KG_DATA_DIR` | `~/.knowledge-graph/data` | SQLite and snapshot storage directory |
+| Env var | Default | Purpose |
+|---|---|---|
+| `KG_DATA_DIR` | `~/.knowledge-graph/data` | SQLite + snapshot storage |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Reddit script app credentials |
+| `REDDIT_REFRESH_TOKEN` | — | preferred over username/password |
+| `REDDIT_USERNAME` / `REDDIT_PASSWORD` | — | password-grant fallback |
+| `YOUTUBE_OAUTH_CLIENT_PATH` | `~/.config/google/youtube_oauth_client.json` | YouTube OAuth client |
+| `YOUTUBE_OAUTH_TOKEN_PATH` | `~/.config/google/youtube_token.json` | cached refresh token |
+| `YOUTUBE_PLAYLIST_PREFIX` | — | also ingest user playlists with this title prefix |
 
-## Run tests
+## What this is NOT
+
+- Not a hosted SaaS — runs locally, you control the data
+- Not an LLM in itself — your existing AI agent (Claude, Cursor, etc.) does the synthesis
+- Not a substitute for Obsidian if you actually like writing notes — different paradigm
+- No OCR for image-only PDFs
+- No semantic linking by default — `SemanticLinker` is optional and runs separately, recommended only after 30+ sources exist
+
+## Tests
 
 ```bash
 pytest
-pytest -v tests/test_entity_crud.py   # specific module
+pytest -v tests/test_entity_crud.py
 ```
 
-## Dependencies
+## License
 
-- **NetworkX** — graph algorithms (PageRank, shortest path, community detection)
-- **SQLite** — persistence (no server required)
-- **numpy** — embedding similarity calculations
-- **Anthropic SDK** — LLM concept extraction via `claude-haiku-4-5`
-- **MCP** — Model Context Protocol server interface
-- **structlog** — structured logging
-- **FastAPI** — HTTP API layer
+MIT

@@ -1,6 +1,44 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
+build/
 dist/
-.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data + databases
 data/
+*.db
+*.sqlite
+*.sqlite3
+~/.knowledge-graph/
+
+# Secrets + credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+youtube_token.json
+youtube_oauth_client.json
+*credentials*.json
+*client_secret*.json
+
+# Editor / IDE
+.vscode/
+.idea/
+.DS_Store
+.opencode-project.json
+*.swp
+*.swo
+
+# OS
+Thumbs.db

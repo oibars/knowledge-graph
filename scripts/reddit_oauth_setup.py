@@ -97,7 +97,7 @@ def main() -> None:
         }
     )
 
-    print(f"Open this URL in a browser logged into the gatoroko Reddit account:\n  {auth_url}\n")
+    print(f"Open this URL in a browser logged into your Reddit account:\n  {auth_url}\n")
     try:
         webbrowser.open(auth_url)
     except Exception:
