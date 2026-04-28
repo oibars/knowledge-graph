@@ -42,3 +42,8 @@ youtube_oauth_client.json
 
 # OS
 Thumbs.db
+
+# Local working dirs (never push)
+drafts/
+notes/
+reports/
