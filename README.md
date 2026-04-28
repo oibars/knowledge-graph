@@ -190,6 +190,18 @@ pytest
 pytest -v tests/test_entity_crud.py
 ```
 
+## Other things I'm building
+
+If this is useful, you might like the other projects I work on.
+
+[**Product Leader Academy**](https://www.productleaderacademy.com). Community and LMS for product leaders. Free-access model with a Premium AI Coach add-on. Next.js, Neon Postgres, Vercel.
+
+[**SwiftRecap**](https://swiftrecap.vercel.app). Autonomous AI tech newsletter for engineers, founders, and PMs. Aggregates RSS, Reddit, GitHub, and HN into weekly digests. Stripe subscriptions plus CPM ad slots.
+
+[**code2figma**](https://code2figma.vercel.app). Convert React, Vue, and Angular components to Figma designs via CLI plus a Figma plugin. Auto-detects the framework and creates structured frames.
+
+[**Imperfit**](https://imperfit.vercel.app). Chat-first AI nutrition app for people who refuse to log meals. Flutter and FastAPI, edge AI (Liquid LFM 2.5) plus Gemini 3 Flash, 3-second voice or photo logging.
+
 ## License
 
 MIT
