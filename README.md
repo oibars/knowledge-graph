@@ -1,10 +1,33 @@
 # knowledge-graph
 
+[![tests](https://img.shields.io/github/actions/workflow/status/oibars/knowledge-graph/test.yml?branch=main&label=tests)](https://github.com/oibars/knowledge-graph/actions/workflows/test.yml)
+[![license](https://img.shields.io/github/license/oibars/knowledge-graph)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![mcp](https://img.shields.io/badge/MCP-native-orange)](https://modelcontextprotocol.io)
+
 Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool. Not a notebook you maintain.
 
 **Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Claude Code, Cursor, or any MCP client gets your saved-content context preloaded as a tool.
 
 What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and others so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. Deterministic relevance scoring from a lexical interest profile built from your own files and graph entities, with no LLM call needed.
+
+## Quickstart
+
+```bash
+git clone https://github.com/oibars/knowledge-graph.git
+cd knowledge-graph
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+kg-ingest-bookmarks --source chrome   # ingest your Chrome bookmarks
+```
+
+Then add this to `~/.claude/settings.json` so Claude Code reaches the graph as a tool.
+
+```json
+{ "mcpServers": { "knowledge-graph": { "command": "kg-mcp" } } }
+```
+
+Restart Claude Code, and `kg_search`, `kg_get_neighbors`, and friends are available in any session.
 
 ## What it ingests
 
