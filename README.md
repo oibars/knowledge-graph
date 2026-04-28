@@ -1,13 +1,10 @@
 # knowledge-graph
 
-Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool — not a notebook you maintain.
+Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool. Not a notebook you maintain.
 
 **Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Claude Code, Cursor, or any MCP client gets your saved-content context preloaded as a tool.
 
-- **Local-first** — runs on your machine, no cloud, no login, no telemetry
-- **MCP-native** — exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors`, etc. so AI agents reach for it as a tool
-- **No notes required** — the ingest pipeline does the work, you just keep saving things normally
-- **Deterministic relevance scoring** — lexical interest profile from your own files + graph entities, no LLM call needed
+What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and others so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. Deterministic relevance scoring from a lexical interest profile built from your own files and graph entities, with no LLM call needed.
 
 ## What it ingests
 
@@ -20,7 +17,7 @@ Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and re
 | Instagram saved posts/reels | Meta data export ZIP | working |
 | Article / PDF / podcast / paper | manual capture via skill or template | working |
 
-Every item lands as `Entity(label="Document")` with an `importance_score` (0.0–1.0) and a `signal-high | signal-medium | signal-low` tag. Re-runs are idempotent (content_hash dedup).
+Every item lands as `Entity(label="Document")` with an `importance_score` (0.0 to 1.0) and a `signal-high | signal-medium | signal-low` tag. Re-runs are idempotent (content_hash dedup).
 
 ## Install
 
@@ -33,13 +30,13 @@ pip install -e ".[reddit,youtube]"   # extras optional per source
 
 Requires Python ≥ 3.11.
 
-## MCP server (Claude Code / Cursor / Claude Desktop)
+## MCP server (Claude Code, Cursor, Claude Desktop)
 
 ```bash
 kg-mcp
 ```
 
-Add to `~/.claude/settings.json` (or your client's MCP config):
+Add to `~/.claude/settings.json` (or your client's MCP config).
 
 ```json
 {
@@ -57,13 +54,13 @@ Add to `~/.claude/settings.json` (or your client's MCP config):
 |---|---|
 | `kg_search` | Search entities by text, optional `label` filter |
 | `kg_get_entity` | Retrieve an entity by id |
-| `kg_get_neighbors` | Neighbors at depth 1–3 |
+| `kg_get_neighbors` | Neighbors at depth 1 to 3 |
 | `kg_find_path` | Shortest path between two entities |
 | `kg_get_stats` | Graph statistics |
 | `kg_add_entity` | Create entity |
 | `kg_add_relation` | Link two entities |
 | `kg_update_entity` | Update fields |
-| `kg_delete_entity` | Delete entity + relations |
+| `kg_delete_entity` | Delete entity and its relations |
 
 ## Ingest your saves
 
@@ -87,18 +84,18 @@ kg-ingest-bookmarks --source chrome --dry-run
 
 ### Reddit setup (OAuth refresh-token, works with Google-SSO accounts)
 
-1. Create a "script"-type app at https://www.reddit.com/prefs/apps with redirect URI `http://localhost:8080`
-2. Set in your shell env:
+1. Create a "script"-type app at https://www.reddit.com/prefs/apps with redirect URI `http://localhost:8080`.
+2. Set in your shell env.
    ```
    REDDIT_CLIENT_ID
    REDDIT_CLIENT_SECRET
    REDDIT_USER_AGENT="knowledge-graph/1.0 by <username>"
    ```
-3. One-time OAuth dance to get a permanent refresh-token (no Reddit password needed):
+3. One-time OAuth dance to get a permanent refresh-token (no Reddit password needed).
    ```bash
    python scripts/reddit_oauth_setup.py
    ```
-   Click Allow in the browser. The script prints the line to add:
+   Click Allow in the browser. The script prints the line to add.
    ```
    set -gx REDDIT_REFRESH_TOKEN "<token>"
    ```
@@ -108,14 +105,14 @@ If you have a Reddit-native password, set `REDDIT_USERNAME` and `REDDIT_PASSWORD
 
 ### YouTube setup
 
-1. Google Cloud Console → enable "YouTube Data API v3"
-2. Create an OAuth 2.0 Desktop client → download JSON → save to `~/.config/google/youtube_oauth_client.json`
-3. Add yourself as a Test user on the OAuth consent screen
-4. Run `kg-ingest-bookmarks --source youtube` — first run opens browser for consent, token caches at `~/.config/google/youtube_token.json`, subsequent runs are silent
+1. In Google Cloud Console, enable "YouTube Data API v3".
+2. Create an OAuth 2.0 Desktop client, download the JSON, save it to `~/.config/google/youtube_oauth_client.json`.
+3. Add yourself as a Test user on the OAuth consent screen.
+4. Run `kg-ingest-bookmarks --source youtube`. The first run opens a browser for consent. The token caches at `~/.config/google/youtube_token.json` and subsequent runs are silent.
 
 ### Instagram setup
 
-Request a Meta data export (Account Center → Your info & permissions → Download your information → JSON, "Saved posts + Saved reels"). Meta emails the link within 48h. Then:
+Request a Meta data export (Account Center, Your info & permissions, Download your information, JSON, "Saved posts + Saved reels"). Meta emails the link within 48h. Then run.
 
 ```bash
 kg-ingest-bookmarks --source instagram --path ~/Downloads/meta_export.zip
@@ -123,13 +120,13 @@ kg-ingest-bookmarks --source instagram --path ~/Downloads/meta_export.zip
 
 ## Capture a single source (article, PDF, podcast)
 
-For deliberate captures with a written thesis instead of bulk firehose ingest, use the `capture-source` skill (`~/.claude/skills/capture-source/SKILL.md`) or copy `sources/_TEMPLATE.md` and run:
+For deliberate captures with a written thesis instead of bulk firehose ingest, use the `capture-source` skill (`~/.claude/skills/capture-source/SKILL.md`) or copy `sources/_TEMPLATE.md` and run.
 
 ```bash
 kg-index-sources
 ```
 
-Each capture produces `Entity(Document)` + one `Entity(Concept)` per claim + author `Entity(Person)` + `[[wikilink]]` references.
+Each capture produces an `Entity(Document)` plus one `Entity(Concept)` per claim plus an author `Entity(Person)` plus `[[wikilink]]` references.
 
 ## Index installed Claude Code agents
 
@@ -139,7 +136,7 @@ kg-index-agents --agents-dir /path/to/agents
 kg-index-agents --dry-run
 ```
 
-After indexing, agents are searchable as a routing layer:
+After indexing, agents are searchable as a routing layer.
 
 ```
 kg_search("debug a production memory leak", label="Agent")
@@ -175,20 +172,16 @@ neighbors = store.get_neighbors("e1", depth=2)
 | Env var | Default | Purpose |
 |---|---|---|
 | `KG_DATA_DIR` | `~/.knowledge-graph/data` | SQLite + snapshot storage |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Reddit script app credentials |
-| `REDDIT_REFRESH_TOKEN` | — | preferred over username/password |
-| `REDDIT_USERNAME` / `REDDIT_PASSWORD` | — | password-grant fallback |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | (none) | Reddit script app credentials |
+| `REDDIT_REFRESH_TOKEN` | (none) | preferred over username/password |
+| `REDDIT_USERNAME` / `REDDIT_PASSWORD` | (none) | password-grant fallback |
 | `YOUTUBE_OAUTH_CLIENT_PATH` | `~/.config/google/youtube_oauth_client.json` | YouTube OAuth client |
 | `YOUTUBE_OAUTH_TOKEN_PATH` | `~/.config/google/youtube_token.json` | cached refresh token |
-| `YOUTUBE_PLAYLIST_PREFIX` | — | also ingest user playlists with this title prefix |
+| `YOUTUBE_PLAYLIST_PREFIX` | (none) | also ingest user playlists with this title prefix |
 
-## What this is NOT
+## What this is not
 
-- Not a hosted SaaS — runs locally, you control the data
-- Not an LLM in itself — your existing AI agent (Claude, Cursor, etc.) does the synthesis
-- Not a substitute for Obsidian if you actually like writing notes — different paradigm
-- No OCR for image-only PDFs
-- No semantic linking by default — `SemanticLinker` is optional and runs separately, recommended only after 30+ sources exist
+This is not a hosted SaaS. It runs locally and you control the data. It is not an LLM in itself. Your existing AI agent (Claude, Cursor, and others) does the synthesis. It is not a substitute for Obsidian if you actually like writing notes. Different paradigm. There is no OCR for image-only PDFs. There is no semantic linking by default. `SemanticLinker` is optional and runs separately, recommended only after 30+ sources exist.
 
 ## Tests
 
