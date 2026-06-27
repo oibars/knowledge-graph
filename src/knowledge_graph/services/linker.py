@@ -3,7 +3,7 @@ Semantic Linker Service
 Automatically creates knowledge graph links using embeddings and LLM-based analysis.
 
 Supports two backends (configured via constructor or environment variables):
-  - Ollama (default, local, 5090): zero API cost, uses local models
+  - Ollama (default, local): zero API cost, uses local models
   - Anthropic (optional): requires ANTHROPIC_API_KEY, uses claude-haiku
 
 Environment variables (all optional):
@@ -69,7 +69,7 @@ class SemanticLinker:
     Creates semantic links between entities in the knowledge graph.
 
     Embedding and concept extraction backend priority:
-      1. Ollama (local, default) — zero cost, uses 5090
+      1. Ollama (local, default) — zero cost, uses local models
       2. sentence-transformers embedding_model (if provided)
       3. Anthropic llm_client (if provided, for concept extraction only)
     """

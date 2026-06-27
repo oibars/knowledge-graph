@@ -1,5 +1,5 @@
 """
-Knowledge Graph Models for SwissPy
+Knowledge Graph Models
 Entity and Relation dataclasses for graph-based knowledge storage.
 """
 

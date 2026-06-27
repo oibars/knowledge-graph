@@ -166,6 +166,8 @@ kg_search("debug a production memory leak", label="Agent")
 → engineering-incident-response-commander, engineering-sre, testing-evidence-collector
 ```
 
+Agent indexing and the optional `SemanticLinker` embed text with a local Ollama model (`nomic-embed-text` by default, see Configuration). No cloud key needed. If Ollama isn't running, indexing still works — it just skips the embeddings and falls back to lexical search.
+
 ## Python API
 
 ```python
@@ -201,6 +203,9 @@ neighbors = store.get_neighbors("e1", depth=2)
 | `YOUTUBE_OAUTH_CLIENT_PATH` | `~/.config/google/youtube_oauth_client.json` | YouTube OAuth client |
 | `YOUTUBE_OAUTH_TOKEN_PATH` | `~/.config/google/youtube_token.json` | cached refresh token |
 | `YOUTUBE_PLAYLIST_PREFIX` | (none) | also ingest user playlists with this title prefix |
+| `OLLAMA_URL` | `http://localhost:11434` | local Ollama endpoint for agent indexing + semantic linking |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | embedding model for those features |
+| `OLLAMA_CHAT_MODEL` | `gemma4:e4b` | chat model for concept extraction in `SemanticLinker` |
 
 ## What this is not
 

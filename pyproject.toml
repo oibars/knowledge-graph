@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "knowledge-graph"
 version = "2.0.0"
-description = "Hybrid knowledge graph with NetworkX + SQLite for AI agent memory, MCP server, and Claude Code agent indexing"
+description = "Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a tool your AI agent queries — with source capture and Claude Code agent indexing"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

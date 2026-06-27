@@ -109,7 +109,7 @@ def index_agents(
         parts = md_file.stem.split("-")
         category_tag = parts[0] if parts else "uncategorized"
 
-        # Generate embedding via Ollama (local, 5090) for semantic search
+        # Generate embedding via Ollama (local) for semantic search
         embedding = None
         if generate_embeddings:
             embed_text = f"{name}: {description}" if description else name

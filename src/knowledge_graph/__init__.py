@@ -1,5 +1,5 @@
 """
-Knowledge Graph App for SwissPy
+Knowledge Graph
 Provides graph-based knowledge storage and semantic relationship tracking.
 """
 
