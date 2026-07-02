@@ -47,3 +47,7 @@ Thumbs.db
 drafts/
 notes/
 reports/
+
+# Personal source captures stay local (public repo) — template stays
+sources/*.md
+!sources/_TEMPLATE.md

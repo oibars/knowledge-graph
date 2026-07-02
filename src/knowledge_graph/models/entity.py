@@ -32,6 +32,18 @@ RELATION_TYPES = {
     "resolves": "Fixes or addresses this entity",
     "supersedes": "Replaces a prior decision or entity",
     "tracked_in": "Monitored or managed in this system",
+    # Inverse forms (auto-created for bidirectional relations)
+    "required_by": "Inverse of depends_on",
+    "implemented_by": "Inverse of implements",
+    "referenced_by": "Inverse of references",
+    "requires": "Inverse of prerequisite_for",
+    "teaches": "Inverse of learned_from",
+    "authored": "Inverse of authored_by",
+    "used_by": "Inverse of uses",
+    "produced_by": "Inverse of produces",
+    "influenced": "Inverse of influenced_by",
+    # Generic semantic association (SemanticLinker output)
+    "related_to": "Generic semantic association",
 }
 
 

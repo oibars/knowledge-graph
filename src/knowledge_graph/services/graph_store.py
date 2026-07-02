@@ -69,13 +69,20 @@ class KnowledgeGraphStore:
         # Auto-snapshot accounting
         self._writes_since_snapshot = 0
         self._last_snapshot_at = datetime.now()
+
+        # Batched read-access persistence (reads must not write synchronously)
+        self._dirty_access: Set[str] = set()
+        # Upsert-by-content index
+        self._hash_to_id: Dict[str, str] = {}
         
         # Initialize database
         self._init_database()
         
         # Load existing data
         self._load_from_database()
-        
+        self._rebuild_hash_index()
+        self._known_mtime = self._current_mtime()
+
         logger.info(
             "KnowledgeGraphStore initialized",
             db_path=str(self.db_path),
@@ -94,8 +101,73 @@ class KnowledgeGraphStore:
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    def _rebuild_hash_index(self):
+        """Rebuild the content_hash -> entity id upsert index."""
+        self._hash_to_id = {
+            e.content_hash: eid for eid, e in self._entities.items() if e.content_hash
+        }
+
+    def _current_mtime(self) -> int:
+        """Newest mtime (ns) across the DB and its WAL — changes on any external write."""
+        m = 0
+        for p in (self.db_path, Path(str(self.db_path) + "-wal")):
+            try:
+                m = max(m, p.stat().st_mtime_ns)
+            except FileNotFoundError:
+                pass
+        return m
+
+    def refresh_if_stale(self):
+        """Reload from SQLite if another process changed the DB since our load.
+
+        The long-running MCP server otherwise never sees rows written by cron
+        ingesters. Costs two stat() calls unless a change is detected.
+        """
+        if self._current_mtime() <= self._known_mtime:
+            return
+        self._flush_access()
+        self._entities.clear()
+        self._relations.clear()
+        self._graph.clear()
+        self._load_from_database()
+        self._rebuild_hash_index()
+        self._known_mtime = self._current_mtime()
+        logger.info(
+            "Graph reloaded after external DB change",
+            entities=len(self._entities),
+            relations=len(self._relations),
+        )
+
+    def _flush_access(self):
+        """Persist batched read-access metadata (last_accessed, access_count)."""
+        if not self._dirty_access:
+            return
+        try:
+            rows = []
+            for eid in self._dirty_access:
+                e = self._entities.get(eid)
+                if e:
+                    rows.append((
+                        e.last_accessed.isoformat() if e.last_accessed else None,
+                        e.access_count,
+                        eid,
+                    ))
+            conn = self._connect()
+            conn.executemany(
+                "UPDATE entities SET last_accessed=?, access_count=? WHERE id=?", rows
+            )
+            conn.commit()
+            conn.close()
+            self._dirty_access.clear()
+            self._known_mtime = self._current_mtime()
+        except Exception as e:
+            logger.warning("Failed to flush access metadata", error=str(e))
+
     def _maybe_snapshot(self):
-        """Trigger a snapshot after enough writes or elapsed time."""
+        """Per-write hook: record our own write's mtime, then snapshot if due."""
+        # Our own commit just changed the DB — don't let refresh_if_stale treat it
+        # as an external change.
+        self._known_mtime = self._current_mtime()
         if not self.enable_snapshots:
             return
         self._writes_since_snapshot += 1
@@ -170,6 +242,7 @@ class KnowledgeGraphStore:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entities_content_hash ON entities(content_hash)")
         
         conn.commit()
         conn.close()
@@ -303,7 +376,15 @@ class KnowledgeGraphStore:
     # ========================================================================
     
     def add_entity(self, entity: Entity) -> str:
-        """Add or update an entity."""
+        """Add or update an entity. Returns the existing id on a content-hash match."""
+        # Upsert-by-content: identical name+description already stored → return it
+        # instead of minting a duplicate node under a fresh id.
+        if entity.content_hash:
+            existing_id = self._hash_to_id.get(entity.content_hash)
+            if existing_id and existing_id != entity.id and existing_id in self._entities:
+                logger.debug("Entity dedup hit", incoming=entity.id, existing=existing_id)
+                return existing_id
+
         # Update in-memory structures
         self._entities[entity.id] = entity
         self._graph.add_node(
@@ -326,12 +407,20 @@ class KnowledgeGraphStore:
         conn.commit()
         conn.close()
         
+        if entity.content_hash:
+            self._hash_to_id[entity.content_hash] = entity.id
+
         logger.debug("Entity added", entity_id=entity.id, label=entity.label)
         self._maybe_snapshot()
         return entity.id
     
     def add_relation(self, relation: Relation) -> str:
         """Add or update a relation."""
+        if relation.relation_type not in RELATION_TYPES:
+            raise ValueError(
+                f"Unknown relation_type '{relation.relation_type}' — "
+                f"must be one of RELATION_TYPES"
+            )
         # Validate entities exist
         if relation.source_id not in self._entities:
             raise ValueError(f"Source entity not found: {relation.source_id}")
@@ -387,6 +476,14 @@ class KnowledgeGraphStore:
                     strength=inverse.strength,
                     data=inverse
                 )
+                # Persist the inverse too — memory-only twins vanished on restart
+                inv_conn = self._connect()
+                inv_conn.execute(
+                    "INSERT OR REPLACE INTO relations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._relation_to_row(inverse)
+                )
+                inv_conn.commit()
+                inv_conn.close()
         
         logger.debug(
             "Relation added",
@@ -399,11 +496,13 @@ class KnowledgeGraphStore:
         return relation.id
     
     def get_entity(self, entity_id: str) -> Optional[Entity]:
-        """Get an entity by ID."""
+        """Get an entity by ID. Access metadata is batched, not written per read."""
         entity = self._entities.get(entity_id)
         if entity:
             entity.touch()
-            self._update_entity_access(entity)
+            self._dirty_access.add(entity_id)
+            if len(self._dirty_access) >= 25:
+                self._flush_access()
         return entity
     
     def get_relation(self, relation_id: str) -> Optional[Relation]:
@@ -432,6 +531,8 @@ class KnowledgeGraphStore:
         # Remove from graph
         self._graph.remove_node(entity_id)
         del self._entities[entity_id]
+        self._hash_to_id = {h: i for h, i in self._hash_to_id.items() if i != entity_id}
+        self._dirty_access.discard(entity_id)
         
         # Update database
         conn = self._connect()
@@ -462,34 +563,26 @@ class KnowledgeGraphStore:
             self._graph.remove_edge(relation.source_id, relation.target_id)
         
         del self._relations[relation_id]
-        
+
+        # Remove the persisted inverse twin, if one was created
+        inverse_id = relation.get_inverse_id() if relation.bidirectional else None
+        if inverse_id and inverse_id in self._relations:
+            inv = self._relations.pop(inverse_id)
+            if self._graph.has_edge(inv.source_id, inv.target_id):
+                self._graph.remove_edge(inv.source_id, inv.target_id)
+
         # Update database
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM relations WHERE id = ?", (relation_id,))
+        if inverse_id:
+            cursor.execute("DELETE FROM relations WHERE id = ?", (inverse_id,))
         conn.commit()
         conn.close()
         
         logger.debug("Relation deleted", relation_id=relation_id)
         self._maybe_snapshot()
         return True
-    
-    def _update_entity_access(self, entity: Entity):
-        """Persist access metadata (last_accessed, access_count) to SQLite."""
-        try:
-            conn = self._connect()
-            conn.execute(
-                "UPDATE entities SET last_accessed=?, access_count=? WHERE id=?",
-                (
-                    entity.last_accessed.isoformat() if entity.last_accessed else None,
-                    entity.access_count,
-                    entity.id,
-                ),
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.warning("Failed to persist entity access metadata", entity_id=entity.id, error=str(e))
     
     # ========================================================================
     # Query Operations
@@ -784,25 +877,26 @@ class KnowledgeGraphStore:
         if not self.enable_snapshots:
             return ""
         
+        self._flush_access()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        snapshot_path = self.snapshot_dir / f"kg_snapshot_{timestamp}.pickle"
-        
+        snapshot_path = self.snapshot_dir / f"kg_snapshot_{timestamp}.json"
+
         snapshot_data = {
             "entities": {k: v.to_dict() for k, v in self._entities.items()},
             "relations": {k: v.to_dict() for k, v in self._relations.items()},
             "timestamp": timestamp,
             "stats": self.get_stats()
         }
-        
+
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
-        with open(snapshot_path, "wb") as f:
-            pickle.dump(snapshot_data, f)
+        with open(snapshot_path, "w") as f:
+            json.dump(snapshot_data, f)
 
         self._writes_since_snapshot = 0
         self._last_snapshot_at = datetime.now()
 
-        # Rotate: keep only the newest SNAPSHOT_KEEP snapshots
-        snaps = sorted(self.snapshot_dir.glob("kg_snapshot_*.pickle"))
+        # Rotate: keep only the newest SNAPSHOT_KEEP snapshots (json + legacy pickle)
+        snaps = sorted(self.snapshot_dir.glob("kg_snapshot_*"))
         for old in snaps[:-SNAPSHOT_KEEP]:
             old.unlink(missing_ok=True)
 
@@ -812,8 +906,12 @@ class KnowledgeGraphStore:
     def load_snapshot(self, snapshot_path: str) -> bool:
         """Load a snapshot into the knowledge graph."""
         try:
-            with open(snapshot_path, "rb") as f:
-                snapshot_data = pickle.load(f)
+            if str(snapshot_path).endswith(".json"):
+                with open(snapshot_path) as f:
+                    snapshot_data = json.load(f)
+            else:  # legacy pickle snapshots
+                with open(snapshot_path, "rb") as f:
+                    snapshot_data = pickle.load(f)
             
             # Clear current data
             self._entities.clear()
@@ -857,7 +955,10 @@ class KnowledgeGraphStore:
             
             conn.commit()
             conn.close()
-            
+
+            self._rebuild_hash_index()
+            self._known_mtime = self._current_mtime()
+
             logger.info("Snapshot loaded", path=snapshot_path)
             return True
             

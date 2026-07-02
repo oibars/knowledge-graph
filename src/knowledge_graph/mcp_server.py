@@ -65,6 +65,7 @@ def kg_search(query: str, label: Optional[str] = None, limit: int = 10) -> list[
     Returns:
         List of matching entities with id, name, label, description, tags
     """
+    store.refresh_if_stale()
     results = store.search_entities(query, label=label, limit=limit)
     return [
         {
@@ -86,6 +87,7 @@ def kg_get_entity(entity_id: str) -> dict | None:
     Args:
         entity_id: The entity ID to retrieve
     """
+    store.refresh_if_stale()
     entity = store.get_entity(entity_id)
     if not entity:
         return None
@@ -114,6 +116,7 @@ def kg_get_neighbors(entity_id: str, depth: int = 1) -> dict:
     Returns:
         Dict mapping depth level to list of neighbor entities
     """
+    store.refresh_if_stale()
     depth = max(1, min(depth, 3))
     neighbors = store.get_neighbors(entity_id, depth=depth)
     return {
@@ -136,6 +139,7 @@ def kg_find_path(source_id: str, target_id: str) -> list[dict] | None:
     Returns:
         Ordered list of entities on the path, or null if no path exists
     """
+    store.refresh_if_stale()
     path = store.find_path(source_id, target_id)
     if not path:
         return None
@@ -145,6 +149,7 @@ def kg_find_path(source_id: str, target_id: str) -> list[dict] | None:
 @mcp.tool()
 def kg_get_stats() -> dict:
     """Get knowledge graph statistics: entity count, relation count, label distribution."""
+    store.refresh_if_stale()
     return store.get_stats()
 
 
@@ -180,6 +185,7 @@ def kg_add_entity(
     Returns:
         The created entity ID
     """
+    store.refresh_if_stale()
     entity = Entity(
         id=f"{label.lower()}-{uuid.uuid4().hex[:10]}",
         label=label,
@@ -220,6 +226,7 @@ def kg_add_relation(
     Returns:
         The created relation ID
     """
+    store.refresh_if_stale()
     relation = Relation(
         id=f"rel-{uuid.uuid4().hex[:10]}",
         source_id=source_id,
@@ -253,6 +260,7 @@ def kg_update_entity(
     Returns:
         True if updated, False if entity not found
     """
+    store.refresh_if_stale()
     entity = store.get_entity(entity_id)
     if not entity:
         return False
@@ -280,6 +288,7 @@ def kg_delete_entity(entity_id: str) -> bool:
     Returns:
         True if deleted, False if not found
     """
+    store.refresh_if_stale()
     return store.delete_entity(entity_id)
 
 

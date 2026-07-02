@@ -5,7 +5,7 @@ Builds a keyword → weight map from the user's Claude memory files and the
 existing knowledge graph. Used by ingesters to score bookmarks for relevance.
 
 Sources of signal:
-  - ~/.claude/projects/-home-oscr/memory/*.md (project/user/feedback/reference memories)
+  - the newest ~/.claude/projects/*/memory/*.md dir, or KG_MEMORY_DIR (project/user/feedback/reference memories)
   - Existing Document, Concept, Tag entities in the graph
   - Known-interest domains (github.com, vercel.com, …) with static weights
 
@@ -18,6 +18,7 @@ Design:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from collections import Counter
@@ -27,7 +28,21 @@ from typing import Iterable
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
 
 
-MEMORY_DIR = Path.home() / ".claude" / "projects" / "-home-oscr" / "memory"
+def _default_memory_dir() -> Path:
+    """Resolve the Claude Code memory dir: KG_MEMORY_DIR env wins, else the most
+    recently modified ~/.claude/projects/*/memory directory on this machine."""
+    env = os.environ.get("KG_MEMORY_DIR")
+    if env:
+        return Path(env).expanduser()
+    projects = Path.home() / ".claude" / "projects"
+    if projects.exists():
+        candidates = [p for p in projects.glob("*/memory") if p.is_dir()]
+        if candidates:
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+    return projects / "_none" / "memory"
+
+
+MEMORY_DIR = _default_memory_dir()
 
 # High-signal domains — matching adds bonus weight regardless of title content.
 DOMAIN_WEIGHTS = {
