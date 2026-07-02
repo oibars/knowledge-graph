@@ -20,10 +20,16 @@ Add to ~/.claude/settings.json:
 """
 
 import os
+import sys
 import uuid
 from typing import Optional
 
+import structlog
 from mcp.server.fastmcp import FastMCP
+
+# stdio transport frames JSON-RPC on stdout — ALL logging must go to stderr,
+# and this must be configured before the store logs its init lines.
+structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
 
 from knowledge_graph.models import Entity, Relation
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
@@ -277,5 +283,10 @@ def kg_delete_entity(entity_id: str) -> bool:
     return store.delete_entity(entity_id)
 
 
-if __name__ == "__main__":
+def main():
+    """Console entry point (`kg-mcp` in pyproject)."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

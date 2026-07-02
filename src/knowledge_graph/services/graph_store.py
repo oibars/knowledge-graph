@@ -4,6 +4,7 @@ Hybrid storage using NetworkX for in-memory graph operations and SQLite for pers
 """
 
 import json
+import os
 import pickle
 import sqlite3
 import networkx as nx
@@ -17,6 +18,11 @@ import structlog
 from knowledge_graph.models import Entity, Relation, KnowledgeGraph, RELATION_TYPES
 
 logger = structlog.get_logger()
+
+# Auto-snapshot cadence and retention (second line of defense behind external backups)
+SNAPSHOT_EVERY_WRITES = 50
+SNAPSHOT_EVERY_HOURS = 24
+SNAPSHOT_KEEP = 10
 
 
 class KnowledgeGraphStore:
@@ -41,7 +47,14 @@ class KnowledgeGraphStore:
         
         self.db_path = self.data_dir / db_name
         self.enable_snapshots = enable_snapshots
-        self.snapshot_dir = self.data_dir / "kg_snapshots"
+        # KG_SNAPSHOT_DIR relocates snapshots off the data dir (e.g. into a backup
+        # folder); sub-keyed by the data dir's parent so multiple graphs don't collide.
+        snapshot_override = os.environ.get("KG_SNAPSHOT_DIR")
+        self.snapshot_dir = (
+            Path(snapshot_override).expanduser() / self.data_dir.parent.name
+            if snapshot_override
+            else self.data_dir / "kg_snapshots"
+        )
         
         if self.enable_snapshots:
             self.snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +65,10 @@ class KnowledgeGraphStore:
         # Entity and relation storage
         self._entities: Dict[str, Entity] = {}
         self._relations: Dict[str, Relation] = {}
+
+        # Auto-snapshot accounting
+        self._writes_since_snapshot = 0
+        self._last_snapshot_at = datetime.now()
         
         # Initialize database
         self._init_database()
@@ -66,9 +83,34 @@ class KnowledgeGraphStore:
             relations=len(self._relations)
         )
     
+    def _connect(self) -> sqlite3.Connection:
+        """Open a SQLite connection with WAL + busy timeout.
+
+        WAL lets the long-running MCP server and cron ingesters read/write the same
+        DB without 'database is locked' failures; busy_timeout waits out short locks.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        return conn
+
+    def _maybe_snapshot(self):
+        """Trigger a snapshot after enough writes or elapsed time."""
+        if not self.enable_snapshots:
+            return
+        self._writes_since_snapshot += 1
+        due_by_count = self._writes_since_snapshot >= SNAPSHOT_EVERY_WRITES
+        elapsed = (datetime.now() - self._last_snapshot_at).total_seconds()
+        due_by_time = elapsed >= SNAPSHOT_EVERY_HOURS * 3600
+        if due_by_count or due_by_time:
+            try:
+                self.create_snapshot()
+            except Exception as e:
+                logger.warning("Auto-snapshot failed", error=str(e))
+
     def _init_database(self):
         """Initialize SQLite database schema."""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         # Entities table
@@ -134,7 +176,7 @@ class KnowledgeGraphStore:
     
     def _load_from_database(self):
         """Load entities and relations from SQLite into memory."""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         # Load entities
@@ -272,7 +314,7 @@ class KnowledgeGraphStore:
         )
         
         # Persist to database
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -285,6 +327,7 @@ class KnowledgeGraphStore:
         conn.close()
         
         logger.debug("Entity added", entity_id=entity.id, label=entity.label)
+        self._maybe_snapshot()
         return entity.id
     
     def add_relation(self, relation: Relation) -> str:
@@ -306,7 +349,7 @@ class KnowledgeGraphStore:
         )
         
         # Persist to database
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -352,6 +395,7 @@ class KnowledgeGraphStore:
             target=relation.target_id,
             type=relation.relation_type
         )
+        self._maybe_snapshot()
         return relation.id
     
     def get_entity(self, entity_id: str) -> Optional[Entity]:
@@ -390,7 +434,7 @@ class KnowledgeGraphStore:
         del self._entities[entity_id]
         
         # Update database
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
@@ -403,6 +447,7 @@ class KnowledgeGraphStore:
         conn.close()
         
         logger.debug("Entity deleted", entity_id=entity_id, relations_removed=len(relations_to_remove))
+        self._maybe_snapshot()
         return True
     
     def delete_relation(self, relation_id: str) -> bool:
@@ -419,19 +464,20 @@ class KnowledgeGraphStore:
         del self._relations[relation_id]
         
         # Update database
-        conn = sqlite3.connect(str(self.db_path))
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM relations WHERE id = ?", (relation_id,))
         conn.commit()
         conn.close()
         
         logger.debug("Relation deleted", relation_id=relation_id)
+        self._maybe_snapshot()
         return True
     
     def _update_entity_access(self, entity: Entity):
         """Persist access metadata (last_accessed, access_count) to SQLite."""
         try:
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._connect()
             conn.execute(
                 "UPDATE entities SET last_accessed=?, access_count=? WHERE id=?",
                 (
@@ -748,9 +794,18 @@ class KnowledgeGraphStore:
             "stats": self.get_stats()
         }
         
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
         with open(snapshot_path, "wb") as f:
             pickle.dump(snapshot_data, f)
-        
+
+        self._writes_since_snapshot = 0
+        self._last_snapshot_at = datetime.now()
+
+        # Rotate: keep only the newest SNAPSHOT_KEEP snapshots
+        snaps = sorted(self.snapshot_dir.glob("kg_snapshot_*.pickle"))
+        for old in snaps[:-SNAPSHOT_KEEP]:
+            old.unlink(missing_ok=True)
+
         logger.info("Snapshot created", path=str(snapshot_path))
         return str(snapshot_path)
     
@@ -782,7 +837,7 @@ class KnowledgeGraphStore:
                 )
             
             # Persist to database
-            conn = sqlite3.connect(str(self.db_path))
+            conn = self._connect()
             cursor = conn.cursor()
             
             cursor.execute("DELETE FROM entities")
