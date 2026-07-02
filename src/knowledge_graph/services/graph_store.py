@@ -6,6 +6,7 @@ Hybrid storage using NetworkX for in-memory graph operations and SQLite for pers
 import json
 import os
 import pickle
+import re
 import sqlite3
 import networkx as nx
 import numpy as np
@@ -74,6 +75,8 @@ class KnowledgeGraphStore:
         self._dirty_access: Set[str] = set()
         # Upsert-by-content index
         self._hash_to_id: Dict[str, str] = {}
+        # Whole-graph centrality maps are O(V·E) — cache until the graph changes
+        self._centrality_cache: Dict[str, Dict[str, float]] = {}
         
         # Initialize database
         self._init_database()
@@ -129,6 +132,7 @@ class KnowledgeGraphStore:
         self._entities.clear()
         self._relations.clear()
         self._graph.clear()
+        self._centrality_cache.clear()
         self._load_from_database()
         self._rebuild_hash_index()
         self._known_mtime = self._current_mtime()
@@ -168,6 +172,7 @@ class KnowledgeGraphStore:
         # Our own commit just changed the DB — don't let refresh_if_stale treat it
         # as an external change.
         self._known_mtime = self._current_mtime()
+        self._centrality_cache.clear()
         if not self.enable_snapshots:
             return
         self._writes_since_snapshot += 1
@@ -588,48 +593,137 @@ class KnowledgeGraphStore:
     # Query Operations
     # ========================================================================
     
+    @staticmethod
+    def _tokenize(text: str) -> Set[str]:
+        return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 2}
+
+    def _embed_query(self, text: str) -> Optional[List[float]]:
+        """Embed a query via local Ollama; None when unavailable (lexical fallback).
+
+        OLLAMA_EMBED_MODEL must match the model that embedded the stored entities —
+        vectors from different models are not comparable.
+        """
+        url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+        model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        try:
+            import urllib.request
+
+            body = json.dumps({"model": model, "input": text[:2000]}).encode()
+            req = urllib.request.Request(
+                f"{url}/api/embed", data=body, headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                d = json.load(r)
+            v = d.get("embeddings") or d.get("embedding")
+            return v[0] if v and isinstance(v[0], list) else v
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cosine(a: List[float], b: List[float]) -> float:
+        va, vb = np.array(a), np.array(b)
+        denom = np.linalg.norm(va) * np.linalg.norm(vb)
+        if denom == 0:
+            return 0.0
+        return float(np.dot(va, vb) / denom)
+
     def search_entities(
         self,
         query: str,
         label: Optional[str] = None,
-        limit: int = 10
+        limit: int = 10,
+        tags: Optional[List[str]] = None,
+        source_app: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        semantic: bool = True,
     ) -> List[Entity]:
-        """Search entities by name or description."""
-        query_lower = query.lower()
-        matches = []
-        
-        for entity in self._entities.values():
-            score = 0
-            
-            # Name match (highest weight)
-            if query_lower in entity.name.lower():
-                score += 10
-                if entity.name.lower() == query_lower:
-                    score += 5
-            
-            # Description match
-            if entity.description and query_lower in entity.description.lower():
-                score += 3
-            
-            # Tag match
-            for tag in entity.tags:
-                if query_lower in tag.lower():
-                    score += 2
-            
-            # Topic match
-            for topic in entity.topics:
-                if query_lower in topic.lower():
-                    score += 1
-            
+        """Hybrid search: tokenized lexical + semantic (when Ollama and stored
+        embeddings are available) blended with importance and recency.
+
+        Filters: label, tags (entity must carry all), source_app,
+        created_after/created_before (ISO dates, compared on created_at).
+        """
+        q_tokens = self._tokenize(query)
+        q_lower = query.lower().strip()
+        after = datetime.fromisoformat(created_after) if created_after else None
+        before = datetime.fromisoformat(created_before) if created_before else None
+
+        # Filter pass
+        pool = []
+        for e in self._entities.values():
+            if label and e.label != label:
+                continue
+            if tags and not all(t in e.tags for t in tags):
+                continue
+            if source_app and e.source_app != source_app:
+                continue
+            if after and e.created_at < after:
+                continue
+            if before and e.created_at > before:
+                continue
+            pool.append(e)
+        if not pool:
+            return []
+
+        # Lexical: token overlap weighted by field + whole-phrase bonus
+        lex: Dict[str, float] = {}
+        for e in pool:
+            score = 0.0
+            name_l = e.name.lower()
+            desc_l = (e.description or "").lower()
+            name_toks = self._tokenize(e.name)
+            desc_toks = self._tokenize(e.description or "")
+            tag_toks = self._tokenize(" ".join(e.tags))
+            topic_toks = self._tokenize(" ".join(e.topics))
+            for t in q_tokens:
+                if t in name_toks:
+                    score += 3.0
+                if t in desc_toks:
+                    score += 1.5
+                if t in tag_toks:
+                    score += 2.0
+                if t in topic_toks:
+                    score += 1.0
+            if q_lower and q_lower in name_l:
+                score += 6.0
+                if name_l == q_lower:
+                    score += 3.0
+            elif q_lower and q_lower in desc_l:
+                score += 2.0
             if score > 0:
-                # Filter by label if specified
-                if label and entity.label != label:
-                    continue
-                matches.append((score, entity))
-        
-        # Sort by score
-        matches.sort(key=lambda x: x[0], reverse=True)
-        return [entity for _, entity in matches[:limit]]
+                lex[e.id] = score
+        lex_max = max(lex.values()) if lex else 1.0
+
+        # Semantic: one query embedding, cosine against stored vectors (dim-guarded)
+        sem: Dict[str, float] = {}
+        if semantic:
+            qvec = self._embed_query(query)
+            if qvec:
+                for e in pool:
+                    if e.embedding and len(e.embedding) == len(qvec):
+                        s = self._cosine(qvec, e.embedding)
+                        if s > 0:
+                            sem[e.id] = s
+
+        # Blend: lexical + semantic + importance + recency (90-day half-life)
+        now = datetime.now()
+        results = []
+        for e in pool:
+            l = lex.get(e.id, 0.0) / lex_max
+            s = sem.get(e.id, 0.0)
+            if l <= 0 and s < 0.55:
+                continue
+            age_days = max(0.0, (now - e.updated_at).total_seconds() / 86400)
+            recency = 0.5 ** (age_days / 90.0)
+            if sem:
+                final = 0.45 * l + 0.30 * s + 0.15 * e.importance_score + 0.10 * recency
+            else:
+                final = 0.65 * l + 0.20 * e.importance_score + 0.15 * recency
+            results.append((final, e))
+
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [e for _, e in results[:limit]]
     
     def find_by_label(self, label: str) -> List[Entity]:
         """Find all entities of a specific label type."""
@@ -747,32 +841,26 @@ class KnowledgeGraphStore:
         """
         if entity_id not in self._entities:
             return 0.0
-        
-        if metric == "pagerank":
-            try:
-                pr = nx.pagerank(self._graph)
-                return pr.get(entity_id, 0.0)
-            except:
-                return 0.0
-        
-        elif metric == "degree":
+
+        if metric == "degree":
             return self._graph.degree(entity_id)
-        
-        elif metric == "betweenness":
+
+        computers = {
+            "pagerank": nx.pagerank,
+            "betweenness": nx.betweenness_centrality,
+            "closeness": nx.closeness_centrality,
+        }
+        fn = computers.get(metric)
+        if fn is None:
+            return 0.0
+
+        # Whole-graph maps are expensive — compute once, reuse until a write clears the cache
+        if metric not in self._centrality_cache:
             try:
-                bc = nx.betweenness_centrality(self._graph)
-                return bc.get(entity_id, 0.0)
-            except:
+                self._centrality_cache[metric] = fn(self._graph)
+            except Exception:
                 return 0.0
-        
-        elif metric == "closeness":
-            try:
-                cc = nx.closeness_centrality(self._graph)
-                return cc.get(entity_id, 0.0)
-            except:
-                return 0.0
-        
-        return 0.0
+        return self._centrality_cache[metric].get(entity_id, 0.0)
     
     def find_communities(self) -> List[Set[str]]:
         """Find communities in the knowledge graph."""
@@ -800,7 +888,9 @@ class KnowledgeGraphStore:
         for other_id, other in self._entities.items():
             if other_id == entity_id or not other.embedding:
                 continue
-            
+            if len(other.embedding) != len(entity.embedding):
+                continue  # different embedding model — not comparable
+
             other_embedding = np.array(other.embedding)
             
             # Cosine similarity

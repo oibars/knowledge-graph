@@ -54,19 +54,39 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def kg_search(query: str, label: Optional[str] = None, limit: int = 10) -> list[dict]:
-    """Search knowledge graph entities by text query.
+def kg_search(
+    query: str,
+    label: Optional[str] = None,
+    limit: int = 10,
+    tags: Optional[list[str]] = None,
+    source_app: Optional[str] = None,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
+) -> list[dict]:
+    """Hybrid search (lexical + semantic + importance + recency) over the graph.
 
     Args:
         query: Natural language search query
         label: Optional entity type filter (e.g. "Concept", "Agent", "Decision", "Bug")
         limit: Maximum results to return (default 10)
+        tags: Only entities carrying ALL of these tags
+        source_app: Only entities from this source (e.g. "fieldy", "plaud", "chrome")
+        created_after: ISO date — only entities created on/after (e.g. "2026-06-01")
+        created_before: ISO date — only entities created on/before
 
     Returns:
         List of matching entities with id, name, label, description, tags
     """
     store.refresh_if_stale()
-    results = store.search_entities(query, label=label, limit=limit)
+    results = store.search_entities(
+        query,
+        label=label,
+        limit=limit,
+        tags=tags,
+        source_app=source_app,
+        created_after=created_after,
+        created_before=created_before,
+    )
     return [
         {
             "id": e.id,
@@ -106,19 +126,20 @@ def kg_get_entity(entity_id: str) -> dict | None:
 
 
 @mcp.tool()
-def kg_get_neighbors(entity_id: str, depth: int = 1) -> dict:
+def kg_get_neighbors(entity_id: str, depth: int = 1, relation_type: Optional[str] = None) -> dict:
     """Get neighboring entities at a given traversal depth.
 
     Args:
         entity_id: Starting entity ID
         depth: Traversal depth 1-3 (default 1)
+        relation_type: Only traverse edges of this type (e.g. "depends_on", "part_of")
 
     Returns:
         Dict mapping depth level to list of neighbor entities
     """
     store.refresh_if_stale()
     depth = max(1, min(depth, 3))
-    neighbors = store.get_neighbors(entity_id, depth=depth)
+    neighbors = store.get_neighbors(entity_id, relation_type=relation_type, depth=depth)
     return {
         str(d): [
             {"id": e.id, "name": e.name, "label": e.label, "description": e.description}
@@ -290,6 +311,93 @@ def kg_delete_entity(entity_id: str) -> bool:
     """
     store.refresh_if_stale()
     return store.delete_entity(entity_id)
+
+
+@mcp.tool()
+def kg_find_by_tag(tag: str, label: Optional[str] = None, limit: int = 20) -> list[dict]:
+    """List entities carrying a specific tag.
+
+    Args:
+        tag: Tag to match exactly (e.g. "signal-high", "bookmark")
+        label: Optional entity type filter
+        limit: Maximum results (default 20)
+    """
+    store.refresh_if_stale()
+    results = store.find_by_tag(tag)
+    if label:
+        results = [e for e in results if e.label == label]
+    results.sort(key=lambda e: e.importance_score, reverse=True)
+    return [
+        {"id": e.id, "name": e.name, "label": e.label, "tags": e.tags,
+         "importance_score": e.importance_score}
+        for e in results[:limit]
+    ]
+
+
+@mcp.tool()
+def kg_get_relations(entity_id: str, direction: str = "both") -> list[dict]:
+    """List an entity's typed relations.
+
+    Args:
+        entity_id: Entity ID
+        direction: "out" (this → others), "in" (others → this), or "both"
+    """
+    store.refresh_if_stale()
+    relations = store.get_entity_relations(entity_id, direction=direction)
+    return [
+        {
+            "id": r.id,
+            "source_id": r.source_id,
+            "target_id": r.target_id,
+            "relation_type": r.relation_type,
+            "strength": r.strength,
+            "reason": r.connection_reason,
+        }
+        for r in relations
+    ]
+
+
+@mcp.tool()
+def kg_find_similar(entity_id: str, limit: int = 5) -> list[dict]:
+    """Find semantically similar entities via stored embeddings.
+
+    Args:
+        entity_id: Entity to compare against (must have an embedding)
+        limit: Maximum results (default 5)
+    """
+    store.refresh_if_stale()
+    similar = store.find_similar_entities(entity_id, limit=limit)
+    return [
+        {"id": e.id, "name": e.name, "label": e.label, "similarity": round(score, 3)}
+        for e, score in similar
+    ]
+
+
+@mcp.tool()
+def kg_add_entities(entities: list[dict]) -> list[str]:
+    """Bulk-add entities in one call. Each dict: {label, name, description?, tags?,
+    properties?, source_app?, importance_score?}. Content-identical entries dedupe
+    to the existing entity id.
+
+    Returns:
+        List of entity ids in input order.
+    """
+    store.refresh_if_stale()
+    ids = []
+    for spec in entities:
+        entity = Entity(
+            id=f"{str(spec['label']).lower()}-{uuid.uuid4().hex[:10]}",
+            label=spec["label"],
+            name=spec["name"],
+            description=spec.get("description"),
+            tags=spec.get("tags") or [],
+            properties=spec.get("properties") or {},
+            source_app=spec.get("source_app", "claude-code"),
+            importance_score=max(0.0, min(1.0, float(spec.get("importance_score", 0.5)))),
+            is_auto_generated=True,
+        )
+        ids.append(store.add_entity(entity))
+    return ids
 
 
 def main():
