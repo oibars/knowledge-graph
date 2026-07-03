@@ -71,6 +71,45 @@ def conversation_entity(
     )
 
 
+def trend_entity(item: dict, source: str = "swiftrecap", scope: str = "professional") -> Entity:
+    """Build a Document entity from a trend-feed item (e.g. SwiftRecap /api/signal.json).
+
+    Item shape: {title, summary?, url, category?, topic?, keywords?, sourceDomain?,
+    sourceTier?, popularity?, publishedAt}. Importance blends a trend baseline with
+    the feed's popularity signal (0.4 → 0.8).
+    """
+    import hashlib
+
+    url = item["url"]
+    try:
+        created = datetime.fromisoformat(str(item.get("publishedAt", ""))[:19])
+    except ValueError:
+        created = datetime.now()
+    category = item.get("category")
+    keywords = [k for k in (item.get("keywords") or []) if k][:5]
+    topics = [t for t in [category, item.get("topic")] if t] + keywords
+    popularity = min(1.0, max(0.0, float(item.get("popularity") or 0)))
+    domain = "professional" if scope == "professional" else "personal"
+    return Entity(
+        id=f"trend-{source}-{hashlib.sha1(url.encode()).hexdigest()[:12]}",
+        label="Document",
+        name=(item.get("title") or "Untitled")[:300],
+        description=(item.get("summary") or "")[:2000] or None,
+        source_app=source,
+        source_url=url,
+        topics=topics,
+        tags=[source, "trend", domain] + ([category] if category else []),
+        importance_score=round(0.4 + 0.4 * popularity, 3),
+        created_at=created,
+        properties={
+            "domain": domain,
+            "sourceDomain": item.get("sourceDomain"),
+            "sourceTier": item.get("sourceTier"),
+            "popularity": popularity,
+        },
+    )
+
+
 def ingest_staging_jsonl(
     source: str,
     staging_path: str | Path,

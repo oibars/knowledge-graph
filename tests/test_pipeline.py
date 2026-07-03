@@ -46,6 +46,42 @@ def test_ingest_staging_jsonl(tmp_path):
     assert store.get_stats()["entity_count"] == 2
 
 
+def test_trend_entity_shape():
+    from knowledge_graph.pipeline import trend_entity
+
+    item = {
+        "title": "Anthropic ships Fable 5",
+        "summary": "New frontier model released.",
+        "url": "https://example.com/fable-5",
+        "category": "ai",
+        "topic": "models",
+        "keywords": ["anthropic", "fable"],
+        "sourceDomain": "example.com",
+        "sourceTier": "tier_1",
+        "popularity": 0.5,
+        "publishedAt": "2026-07-01T12:00:00.000Z",
+    }
+    e = trend_entity(item)
+    assert e.id.startswith("trend-swiftrecap-")
+    assert e.label == "Document"
+    assert e.properties["domain"] == "professional"
+    assert "trend" in e.tags and "ai" in e.tags
+    assert e.importance_score == 0.6  # 0.4 + 0.4*0.5
+    assert "models" in e.topics and "anthropic" in e.topics
+    assert e.created_at.year == 2026
+
+    # stable id: same url → same entity id
+    assert trend_entity(item).id == e.id
+
+
+def test_trend_entity_survives_sparse_item():
+    from knowledge_graph.pipeline import trend_entity
+
+    e = trend_entity({"url": "https://example.com/x", "publishedAt": None})
+    assert e.name == "Untitled"
+    assert e.importance_score == 0.4
+
+
 def test_ingest_content_identical_records_dedupe(tmp_path):
     # different staging ids but identical title+text → one entity (content dedup)
     staging = tmp_path / "staging.jsonl"
