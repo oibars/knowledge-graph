@@ -9,7 +9,7 @@ Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and re
 
 **Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Claude Code, Cursor, or any MCP client gets your saved-content context preloaded as a tool.
 
-What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and others so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. Deterministic relevance scoring from a lexical interest profile built from your own files and graph entities, with no LLM call needed.
+What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and 10 more tools so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. **Hybrid retrieval**: tokenized lexical search blended with local semantic similarity (Ollama embeddings, when available), importance, and recency — degrading gracefully to lexical-only when Ollama is down. Deterministic relevance scoring at ingest time from a lexical interest profile built from your own files and graph entities, with no LLM call needed. Built for concurrent use: a long-running MCP server and cron ingesters can share the same database safely (WAL journaling), and the server picks up external writes without a restart.
 
 ## Quickstart
 
@@ -75,15 +75,26 @@ Add to `~/.claude/settings.json` (or your client's MCP config).
 
 | Tool | Purpose |
 |---|---|
-| `kg_search` | Search entities by text, optional `label` filter |
+| `kg_search` | Hybrid search (lexical + semantic + importance + recency); filters: `label`, `tags`, `source_app`, `created_after`/`created_before` |
 | `kg_get_entity` | Retrieve an entity by id |
-| `kg_get_neighbors` | Neighbors at depth 1 to 3 |
+| `kg_get_neighbors` | Neighbors at depth 1 to 3, optionally filtered by `relation_type` |
 | `kg_find_path` | Shortest path between two entities |
+| `kg_get_relations` | An entity's typed relations (`in` / `out` / `both`) |
+| `kg_find_by_tag` | List entities carrying a tag, ranked by importance |
+| `kg_find_similar` | Semantically similar entities via stored embeddings |
 | `kg_get_stats` | Graph statistics |
-| `kg_add_entity` | Create entity |
-| `kg_add_relation` | Link two entities |
+| `kg_add_entity` | Create entity (content-identical adds dedupe to the existing id) |
+| `kg_add_entities` | Bulk add in one call |
+| `kg_add_relation` | Link two entities (relation type validated) |
 | `kg_update_entity` | Update fields |
 | `kg_delete_entity` | Delete entity and its relations |
+
+### Reliability
+
+- **Safe under concurrency** — every connection uses WAL + busy timeouts; the MCP server detects external writes (cron ingesters) and reloads automatically, so it never serves stale answers.
+- **Upsert by content** — entities carry a `content_hash`; re-adding identical name+description returns the existing entity instead of minting a duplicate.
+- **Validated relations** — `relation_type` is checked against the vocabulary; bidirectional relations persist their inverse edge (it survives restarts).
+- **Auto-snapshots** — JSON snapshots every 50 writes / 24h with rotation (`KG_SNAPSHOT_DIR` relocates them). Snapshots are a second line of defense: still back up the data dir itself.
 
 ## Ingest your saves
 
@@ -141,6 +152,23 @@ Request a Meta data export (Account Center, Your info & permissions, Download yo
 kg-ingest-bookmarks --source instagram --path ~/Downloads/meta_export.zip
 ```
 
+## Build an always-on ingester (`knowledge_graph.pipeline`)
+
+For continuous sources (meeting transcripts, trend feeds), `knowledge_graph.pipeline` is the shared implementation — write a thin fetcher, not another Entity constructor:
+
+```python
+from knowledge_graph.pipeline import store_for, ingest_staging_jsonl, trend_entity
+
+# Conversation-shaped staging JSONL: {"id", "title", "date", "topics": [], "speakers": [], "text"}
+n = ingest_staging_jsonl("myrecorder", "staging.jsonl", scope="professional")
+
+# Trend-feed items: {"title", "summary", "url", "category", "keywords": [], "popularity", "publishedAt"}
+store = store_for("professional")
+store.add_entity(trend_entity(item, source="mynewsfeed"))
+```
+
+Both paths get stable ids, domain stamping, and content-hash dedup for free — re-runs are idempotent.
+
 ## Capture a single source (article, PDF, podcast)
 
 For deliberate captures with a written thesis instead of bulk firehose ingest, use the `capture-source` skill (`~/.claude/skills/capture-source/SKILL.md`) or copy `sources/_TEMPLATE.md` and run.
@@ -190,7 +218,7 @@ neighbors = store.get_neighbors("e1", depth=2)
 
 ## Relation types
 
-`contains` `depends_on` `implements` `references` `similar_to` `contradicts` `prerequisite_for` `learned_from` `authored_by` `located_in` `part_of` `uses` `produces` `influenced_by` `routed_to` `spawned_by` `resolves` `supersedes` `tracked_in`
+`contains` `depends_on` `implements` `references` `similar_to` `contradicts` `prerequisite_for` `learned_from` `authored_by` `located_in` `part_of` `uses` `produces` `influenced_by` `routed_to` `spawned_by` `resolves` `supersedes` `tracked_in` `related_to` — plus the auto-created inverse forms (`required_by`, `implemented_by`, `referenced_by`, `requires`, `teaches`, `authored`, `used_by`, `produced_by`, `influenced`). Unknown types are rejected at write time.
 
 ## Configuration
 
@@ -203,13 +231,15 @@ neighbors = store.get_neighbors("e1", depth=2)
 | `YOUTUBE_OAUTH_CLIENT_PATH` | `~/.config/google/youtube_oauth_client.json` | YouTube OAuth client |
 | `YOUTUBE_OAUTH_TOKEN_PATH` | `~/.config/google/youtube_token.json` | cached refresh token |
 | `YOUTUBE_PLAYLIST_PREFIX` | (none) | also ingest user playlists with this title prefix |
-| `OLLAMA_URL` | `http://localhost:11434` | local Ollama endpoint for agent indexing + semantic linking |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | embedding model for those features |
+| `OLLAMA_URL` | `http://localhost:11434` | local Ollama endpoint for semantic search, agent indexing, and linking |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | embedding model — **must match the model that embedded your stored entities**; mixed vector spaces are skipped via a dimension guard |
 | `OLLAMA_CHAT_MODEL` | `gemma4:e4b` | chat model for concept extraction in `SemanticLinker` |
+| `KG_SNAPSHOT_DIR` | `<data_dir>/kg_snapshots` | relocate auto-snapshots (e.g. into a backup folder) |
+| `KG_MEMORY_DIR` | newest `~/.claude/projects/*/memory` | memory-files source for the interest profile |
 
 ## What this is not
 
-This is not a hosted SaaS. It runs locally and you control the data. It is not an LLM in itself. Your existing AI agent (Claude, Cursor, and others) does the synthesis. It is not a substitute for Obsidian if you actually like writing notes. Different paradigm. There is no OCR for image-only PDFs. There is no semantic linking by default. `SemanticLinker` is optional and runs separately, recommended only after 30+ sources exist.
+This is not a hosted SaaS. It runs locally and you control the data. It is not an LLM in itself. Your existing AI agent (Claude, Cursor, and others) does the synthesis. It is not a substitute for Obsidian if you actually like writing notes. Different paradigm. There is no OCR for image-only PDFs. Semantic *search* activates automatically when Ollama is running and entities carry embeddings — and falls back to lexical when it isn't. Semantic *linking* (`SemanticLinker`) is optional and runs separately, recommended only after 30+ sources exist.
 
 ## Tests
 
