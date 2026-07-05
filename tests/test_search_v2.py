@@ -61,6 +61,24 @@ def test_search_semantic_blend_with_fake_embedder(store, monkeypatch):
     assert "sem" in ids, "high-cosine entity must surface even with zero lexical overlap"
 
 
+def test_search_entities_scored_scores_are_absolute(store):
+    store.add_entity(Entity(id="hit", label="Concept", name="postgres tuning"))
+    store.add_entity(Entity(id="weak", label="Concept", name="tuning notes"))
+    scored = store.search_entities_scored("postgres tuning", semantic=False)
+    assert [e.id for _, e in scored] == [entity.id for entity in store.search_entities("postgres tuning", semantic=False)]
+    by_id = {e.id: s for s, e in scored}
+    assert by_id["hit"] > by_id["weak"], "scores must reflect absolute relevance, not position"
+    assert all(0 <= s <= 1.2 for s in by_id.values())
+
+    # cross-store comparability: a store whose ONLY match is weak must not
+    # score it like a perfect match (the old observed-max normalization did)
+    lonely = KnowledgeGraphStore(data_dir=str(store.data_dir) + "-lonely")
+    lonely.add_entity(Entity(id="w2", label="Concept", name="tuning notes"))
+    lonely_score = lonely.search_entities_scored("postgres tuning", semantic=False)[0][0]
+    assert abs(lonely_score - by_id["weak"]) < 1e-9, "same entity, same query → same score in any store"
+    assert lonely_score < by_id["hit"]
+
+
 def test_centrality_cache_invalidated_on_write(store):
     store.add_entity(Entity(id="x", label="Concept", name="X"))
     store.get_centrality("x", metric="pagerank")

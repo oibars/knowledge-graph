@@ -25,6 +25,15 @@ SNAPSHOT_EVERY_WRITES = 50
 SNAPSHOT_EVERY_HOURS = 24
 SNAPSHOT_KEEP = 10
 
+# Function words excluded from lexical search tokens. Without this, natural-
+# language queries ("what can i do this week to…") match on the/this/to/in and
+# style-similar-but-irrelevant documents outrank genuinely relevant ones.
+_SEARCH_STOPWORDS = frozenset(
+    """a an and are as at be but by can could do does for from had has have he her his how
+    i if in is it its me my of on or our she so that the their them then there these they
+    this to und up was we were what when where which who why will with would you your""".split()
+)
+
 
 class KnowledgeGraphStore:
     """
@@ -595,7 +604,11 @@ class KnowledgeGraphStore:
     
     @staticmethod
     def _tokenize(text: str) -> Set[str]:
-        return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 2}
+        return {
+            t
+            for t in re.findall(r"[a-z0-9]+", text.lower())
+            if len(t) >= 2 and t not in _SEARCH_STOPWORDS
+        }
 
     def _embed_query(self, text: str) -> Optional[List[float]]:
         """Embed a query via local Ollama; None when unavailable (lexical fallback).
@@ -627,7 +640,7 @@ class KnowledgeGraphStore:
             return 0.0
         return float(np.dot(va, vb) / denom)
 
-    def search_entities(
+    def search_entities_scored(
         self,
         query: str,
         label: Optional[str] = None,
@@ -637,9 +650,12 @@ class KnowledgeGraphStore:
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         semantic: bool = True,
-    ) -> List[Entity]:
-        """Hybrid search: tokenized lexical + semantic (when Ollama and stored
-        embeddings are available) blended with importance and recency.
+    ) -> List[Tuple[float, Entity]]:
+        """Hybrid search returning (score, entity) pairs, best first.
+
+        Scores are comparable across calls with the same query mode — callers
+        merging results from multiple stores should rank on them rather than on
+        list position. See search_entities for the entities-only convenience.
 
         Filters: label, tags (entity must carry all), source_app,
         created_after/created_before (ISO dates, compared on created_at).
@@ -693,7 +709,12 @@ class KnowledgeGraphStore:
                 score += 2.0
             if score > 0:
                 lex[e.id] = score
-        lex_max = max(lex.values()) if lex else 1.0
+        # Normalize against a query-dependent ceiling (perfect name match + phrase
+        # bonus) rather than the observed max: scores stay comparable across stores
+        # and calls — a store whose best match is weak must not score it 1.0.
+        # Within-store ordering is unchanged (monotonic).
+        lex_ceiling = 3.0 * len(q_tokens) + 9.0 if q_tokens else 1.0
+        lex_max = max(max(lex.values()) if lex else 0.0, lex_ceiling)
 
         # Semantic: one query embedding, cosine against stored vectors (dim-guarded)
         sem: Dict[str, float] = {}
@@ -723,7 +744,38 @@ class KnowledgeGraphStore:
             results.append((final, e))
 
         results.sort(key=lambda x: x[0], reverse=True)
-        return [e for _, e in results[:limit]]
+        return results[:limit]
+
+    def search_entities(
+        self,
+        query: str,
+        label: Optional[str] = None,
+        limit: int = 10,
+        tags: Optional[List[str]] = None,
+        source_app: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        semantic: bool = True,
+    ) -> List[Entity]:
+        """Hybrid search: tokenized lexical + semantic (when Ollama and stored
+        embeddings are available) blended with importance and recency.
+
+        Filters: label, tags (entity must carry all), source_app,
+        created_after/created_before (ISO dates, compared on created_at).
+        """
+        return [
+            e
+            for _, e in self.search_entities_scored(
+                query,
+                label=label,
+                limit=limit,
+                tags=tags,
+                source_app=source_app,
+                created_after=created_after,
+                created_before=created_before,
+                semantic=semantic,
+            )
+        ]
     
     def find_by_label(self, label: str) -> List[Entity]:
         """Find all entities of a specific label type."""
