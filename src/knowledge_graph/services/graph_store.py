@@ -10,7 +10,7 @@ import re
 import sqlite3
 import networkx as nx
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 from dataclasses import asdict
@@ -777,6 +777,26 @@ class KnowledgeGraphStore:
             )
         ]
     
+    def recent_entities(
+        self,
+        days: float = 7,
+        label: Optional[str] = None,
+        source_app: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Entity]:
+        """Entities created in the last `days`, newest first — "what changed"
+        recall without needing a search query."""
+        cutoff = datetime.now() - timedelta(days=days)
+        out = [
+            e
+            for e in self._entities.values()
+            if e.created_at and e.created_at >= cutoff
+            and (label is None or e.label == label)
+            and (source_app is None or e.source_app == source_app)
+        ]
+        out.sort(key=lambda e: e.created_at, reverse=True)
+        return out[:limit]
+
     def find_by_label(self, label: str) -> List[Entity]:
         """Find all entities of a specific label type."""
         return [e for e in self._entities.values() if e.label == label]

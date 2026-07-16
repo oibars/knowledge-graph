@@ -101,6 +101,41 @@ def kg_search(
 
 
 @mcp.tool()
+def kg_recent(
+    days: float = 7,
+    label: Optional[str] = None,
+    source_app: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """What changed: entities created in the last N days, newest first. No query
+    needed — use for "what's new / what changed since last week" style recall.
+
+    Args:
+        days: Look-back window in days (default 7)
+        label: Optional entity type filter (e.g. "Event", "Document", "Decision")
+        source_app: Only entities from this source (e.g. "fieldy", "plaud")
+        limit: Maximum results (default 50)
+
+    Returns:
+        List of entities (id, name, label, description, tags, source_app,
+        created_at), newest first
+    """
+    store.refresh_if_stale()
+    return [
+        {
+            "id": e.id,
+            "name": e.name,
+            "label": e.label,
+            "description": e.description,
+            "tags": e.tags,
+            "source_app": e.source_app,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in store.recent_entities(days=days, label=label, source_app=source_app, limit=limit)
+    ]
+
+
+@mcp.tool()
 def kg_get_entity(entity_id: str) -> dict | None:
     """Get a single entity by ID with full details.
 

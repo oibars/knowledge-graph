@@ -124,3 +124,32 @@ def test_mcp_find_by_tag(server):
 def test_mcp_find_similar_without_embeddings_is_empty(server):
     eid = server.kg_add_entity(label="Concept", name="No vectors here")
     assert server.kg_find_similar(eid) == []
+
+
+def test_recent_entities_window_and_order(store):
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    store.add_entity(Entity(id="old", label="Document", name="ancient doc",
+                            created_at=now - timedelta(days=30)))
+    store.add_entity(Entity(id="mid", label="Document", name="last week doc",
+                            created_at=now - timedelta(days=5)))
+    store.add_entity(Entity(id="new", label="Event", name="yesterday event",
+                            created_at=now - timedelta(days=1), source_app="fieldy"))
+
+    week = store.recent_entities(days=7)
+    assert [e.id for e in week] == ["new", "mid"], "windowed, newest first"
+    assert [e.id for e in store.recent_entities(days=7, label="Event")] == ["new"]
+    assert [e.id for e in store.recent_entities(days=7, source_app="fieldy")] == ["new"]
+    assert [e.id for e in store.recent_entities(days=7, limit=1)] == ["new"]
+    assert [e.id for e in store.recent_entities(days=60)][-1] == "old"
+
+
+def test_kg_recent_tool(server):
+    from datetime import datetime, timedelta
+
+    server.store.add_entity(Entity(id="r1", label="Decision", name="ship phase 5",
+                                   created_at=datetime.now() - timedelta(days=2)))
+    rows = server.kg_recent(days=7)
+    assert rows and rows[0]["id"] == "r1"
+    assert rows[0]["created_at"] is not None
