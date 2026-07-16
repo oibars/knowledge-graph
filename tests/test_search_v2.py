@@ -153,3 +153,13 @@ def test_kg_recent_tool(server):
     rows = server.kg_recent(days=7)
     assert rows and rows[0]["id"] == "r1"
     assert rows[0]["created_at"] is not None
+
+
+def test_recent_entities_mixed_tz(store):
+    from datetime import datetime, timedelta, timezone
+
+    store.add_entity(Entity(id="aware", label="Event", name="utc stamped",
+                            created_at=datetime.now(timezone.utc) - timedelta(days=1)))
+    store.add_entity(Entity(id="naive", label="Event", name="local stamped",
+                            created_at=datetime.now() - timedelta(days=2)))
+    assert [e.id for e in store.recent_entities(days=7)] == ["aware", "naive"]

@@ -787,14 +787,19 @@ class KnowledgeGraphStore:
         """Entities created in the last `days`, newest first — "what changed"
         recall without needing a search query."""
         cutoff = datetime.now() - timedelta(days=days)
+
+        def local_naive(dt: datetime) -> datetime:
+            # stored created_at is mixed naive-local / tz-aware — normalize to compare
+            return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+
         out = [
             e
             for e in self._entities.values()
-            if e.created_at and e.created_at >= cutoff
+            if e.created_at and local_naive(e.created_at) >= cutoff
             and (label is None or e.label == label)
             and (source_app is None or e.source_app == source_app)
         ]
-        out.sort(key=lambda e: e.created_at, reverse=True)
+        out.sort(key=lambda e: local_naive(e.created_at), reverse=True)
         return out[:limit]
 
     def find_by_label(self, label: str) -> List[Entity]:
