@@ -7,7 +7,7 @@
 
 Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool. Not a notebook you maintain.
 
-**Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Claude Code, Cursor, or any MCP client gets your saved-content context preloaded as a tool.
+**Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Grok Build, Claude Code, Cursor, or any MCP client gets that context as tools.
 
 What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and 10 more tools so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. **Hybrid retrieval**: tokenized lexical search blended with local semantic similarity (Ollama embeddings, when available), importance, and recency — degrading gracefully to lexical-only when Ollama is down. Deterministic relevance scoring at ingest time from a lexical interest profile built from your own files and graph entities, with no LLM call needed. Built for concurrent use: a long-running MCP server and cron ingesters can share the same database safely (WAL journaling), and the server picks up external writes without a restart.
 
@@ -21,13 +21,23 @@ pip install -e .
 kg-ingest-bookmarks --source chrome   # ingest your Chrome bookmarks
 ```
 
-Then add this to `~/.claude/settings.json` so Claude Code reaches the graph as a tool.
+Then add the MCP server to your client.
+
+Grok Build:
+
+```bash
+grok mcp add knowledge-graph kg-mcp
+```
+
+That writes `~/.grok/config.toml` as `[mcp_servers.knowledge-graph]` with `command = "kg-mcp"`. A second personal graph is another `grok mcp add` with `KG_DATA_DIR` set via `-e`.
+
+Claude Code (`~/.claude/settings.json`):
 
 ```json
 { "mcpServers": { "knowledge-graph": { "command": "kg-mcp" } } }
 ```
 
-Restart Claude Code, and `kg_search`, `kg_get_neighbors`, and friends are available in any session.
+Restart the client. `kg_search`, `kg_recent`, `kg_get_neighbors`, and the rest are available in any session.
 
 ## What it ingests
 
@@ -53,29 +63,20 @@ pip install -e ".[reddit,youtube]"   # extras optional per source
 
 Requires Python ≥ 3.11.
 
-## MCP server (Claude Code, Cursor, Claude Desktop)
+## MCP server (Grok Build, Claude Code, Cursor, Claude Desktop)
 
 ```bash
 kg-mcp
 ```
 
-Add to `~/.claude/settings.json` (or your client's MCP config).
-
-```json
-{
-  "mcpServers": {
-    "knowledge-graph": {
-      "command": "kg-mcp"
-    }
-  }
-}
-```
+Point your MCP client at that command (see Quickstart). Two stores is a common setup: one professional graph, one personal. Each process needs its own `KG_DATA_DIR`.
 
 ### Available MCP tools
 
 | Tool | Purpose |
 |---|---|
 | `kg_search` | Hybrid search (lexical + semantic + importance + recency); filters: `label`, `tags`, `source_app`, `created_after`/`created_before` |
+| `kg_recent` | Entities created in the last N days, newest first — no query string. Use for "what changed" |
 | `kg_get_entity` | Retrieve an entity by id |
 | `kg_get_neighbors` | Neighbors at depth 1 to 3, optionally filtered by `relation_type` |
 | `kg_find_path` | Shortest path between two entities |
@@ -167,6 +168,8 @@ store = store_for("professional")
 store.add_entity(trend_entity(item, source="mynewsfeed"))
 ```
 
+`trend_entity` sets `created_at` to ingest time. The feed's `publishedAt` is stored on `properties` so a midnight or future publish date cannot reappear in every 24h window.
+
 Both paths get stable ids, domain stamping, and content-hash dedup for free — re-runs are idempotent.
 
 ## Capture a single source (article, PDF, podcast)
@@ -194,7 +197,7 @@ kg_search("debug a production memory leak", label="Agent")
 → engineering-incident-response-commander, engineering-sre, testing-evidence-collector
 ```
 
-Agent indexing and the optional `SemanticLinker` embed text with a local Ollama model (`nomic-embed-text` by default, see Configuration). No cloud key needed. If Ollama isn't running, indexing still works — it just skips the embeddings and falls back to lexical search.
+Agent indexing and the optional `SemanticLinker` embed text with a local Ollama model (`nomic-embed-text` by default). Pin `OLLAMA_EMBED_MODEL` to whatever you used at write time — mixed vector spaces are skipped. `embeddinggemma` is a common fleet-wide choice. No cloud key needed. If Ollama isn't running, indexing still works — it skips embeddings and falls back to lexical search.
 
 ## Python API
 
@@ -239,7 +242,7 @@ neighbors = store.get_neighbors("e1", depth=2)
 
 ## What this is not
 
-This is not a hosted SaaS. It runs locally and you control the data. It is not an LLM in itself. Your existing AI agent (Claude, Cursor, and others) does the synthesis. It is not a substitute for Obsidian if you actually like writing notes. Different paradigm. There is no OCR for image-only PDFs. Semantic *search* activates automatically when Ollama is running and entities carry embeddings — and falls back to lexical when it isn't. Semantic *linking* (`SemanticLinker`) is optional and runs separately, recommended only after 30+ sources exist.
+This is not a hosted SaaS. It runs locally and you control the data. It is not an LLM in itself. Your existing agent (Grok, Claude, Cursor, and others) does the synthesis. It is not a substitute for Obsidian if you actually like writing notes. Different paradigm. There is no OCR for image-only PDFs. Semantic *search* activates automatically when Ollama is running and entities carry embeddings — and falls back to lexical when it isn't. Semantic *linking* (`SemanticLinker`) is optional and runs separately, recommended only after 30+ sources exist.
 
 ## Tests
 

@@ -81,10 +81,15 @@ def trend_entity(item: dict, source: str = "swiftrecap", scope: str = "professio
     import hashlib
 
     url = item["url"]
+    published = None
     try:
-        created = datetime.fromisoformat(str(item.get("publishedAt", ""))[:19])
+        published = datetime.fromisoformat(str(item.get("publishedAt", ""))[:19])
     except ValueError:
-        created = datetime.now()
+        published = None
+    # created_at is ingest time. A feed's publishedAt is often midnight-on-date
+    # and can sit in the future; writing it here made every 24h window re-count
+    # the item until that calendar day expired.
+    created = datetime.now()
     category = item.get("category")
     keywords = [k for k in (item.get("keywords") or []) if k][:5]
     topics = [t for t in [category, item.get("topic")] if t] + keywords
@@ -106,6 +111,7 @@ def trend_entity(item: dict, source: str = "swiftrecap", scope: str = "professio
             "sourceDomain": item.get("sourceDomain"),
             "sourceTier": item.get("sourceTier"),
             "popularity": popularity,
+            "publishedAt": published.isoformat() if published else item.get("publishedAt"),
         },
     )
 

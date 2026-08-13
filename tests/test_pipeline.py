@@ -68,7 +68,9 @@ def test_trend_entity_shape():
     assert "trend" in e.tags and "ai" in e.tags
     assert e.importance_score == 0.6  # 0.4 + 0.4*0.5
     assert "models" in e.topics and "anthropic" in e.topics
-    assert e.created_at.year == 2026
+    # created_at is ingest time; publish date lives on properties
+    assert e.created_at.year >= 2026
+    assert str(e.properties.get("publishedAt", "")).startswith("2026-07-01")
 
     # stable id: same url → same entity id
     assert trend_entity(item).id == e.id
