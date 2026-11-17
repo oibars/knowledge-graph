@@ -107,7 +107,7 @@ def index_source_file(
     content_hash = _short_hash(content)
 
     existing = store.get_entity(doc_id)
-    if existing and existing.content_hash == content_hash:
+    if existing and existing.properties.get("source_version") == content_hash:
         logger.debug("Source unchanged, skipping", file=md_file.name)
         return 0, 0
 
@@ -135,9 +135,12 @@ def index_source_file(
         source_file_path=str(md_file),
         source_app="knowledge-graph",
         importance_score=importance,
-        content_hash=content_hash,
         is_auto_generated=False,
         properties={
+            "source_version": content_hash,
+            "domain": fm.get("domain", "unknown") if fm.get("domain", "unknown") in {"professional", "personal", "mixed", "unknown"} else "unknown",
+            "corpus": fm.get("corpus", "reference") if fm.get("corpus", "reference") in {"memory", "reference"} else "reference",
+            "export_policy": "local_only", "export_permissions": [],
             "author": fm.get("author"),
             "date_published": fm.get("date_published"),
             "date_captured": fm.get("date_captured"),
@@ -156,7 +159,7 @@ def index_source_file(
         entities_added += 1
 
     for claim in claims:
-        concept_id = f"concept-{_short_hash(claim)}"
+        concept_id = f"concept-{_short_hash(doc_id + chr(0) + claim)}"
         if store.get_entity(concept_id):
             continue
         concept = Entity(
@@ -168,6 +171,9 @@ def index_source_file(
             source_file_path=str(md_file),
             source_app="knowledge-graph",
             importance_score=importance,
+            properties={"domain": doc.properties["domain"], "corpus": doc.properties["corpus"],
+                        "parent_id": doc_id, "source_version": content_hash,
+                        "export_policy": "local_only", "export_permissions": []},
             is_auto_generated=False,
         )
         if dry_run:

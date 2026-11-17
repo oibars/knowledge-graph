@@ -84,10 +84,42 @@ def test_trend_entity_survives_sparse_item():
     assert e.importance_score == 0.4
 
 
-def test_ingest_content_identical_records_dedupe(tmp_path):
-    # different staging ids but identical title+text → one entity (content dedup)
+def test_ingest_distinct_occurrences_preserve_ids(tmp_path):
+    # Two source IDs are two meetings even when title and text repeat.
     staging = tmp_path / "staging.jsonl"
     staging.write_text(json.dumps(RECORD) + "\n" + json.dumps({**RECORD, "id": "zzz"}) + "\n")
     store = KnowledgeGraphStore(data_dir=str(tmp_path / "db"))
     ingest_staging_jsonl("fieldy", staging, "professional", store=store)
-    assert store.get_stats()["entity_count"] == 1
+    assert store.get_stats()["entity_count"] == 2
+    assert store.get_entity("conv-fieldy-abc123")
+    assert store.get_entity("conv-fieldy-zzz")
+
+
+def test_conversation_preserves_offset_and_defaults_export_denied():
+    from datetime import timezone
+    from knowledge_graph.privacy import export_allowed
+    e = conversation_entity("fieldy", {**RECORD, "date": "2026-06-30T10:00:00+02:00"}, "professional")
+    assert e.created_at.hour == 8 and e.created_at.tzinfo == timezone.utc
+    assert e.properties["corpus"] == "memory"
+    assert e.properties["export_policy"] == "local_only"
+    assert e.properties["contains_raw"] is True
+    assert e.properties["conversation_id"] == RECORD["id"]
+    assert export_allowed(e) is False
+
+
+def test_conversation_uses_transcript_and_preserves_declared_unknown():
+    e = conversation_entity("fieldy", {"id": "pending", "transcript": "Actual transcript", "domain": "unknown"}, "professional")
+    assert e.description == "Actual transcript"
+    assert e.properties["domain"] == "unknown"
+    assert e.properties["timestamp_status"] == "missing"
+    assert e.properties["occurred_at"] is None
+
+
+def test_trends_reference_corpus_utc_and_export_denied():
+    from knowledge_graph.pipeline import trend_entity
+    from knowledge_graph.privacy import export_allowed
+    e = trend_entity({"url": "https://example.com/news", "publishedAt": "2026-06-30T10:00:00+02:00"})
+    assert e.properties["publishedAt"] == "2026-06-30T08:00:00+00:00"
+    assert e.properties["corpus"] == "reference"
+    assert e.properties["export_policy"] == "local_only"
+    assert export_allowed(e) is False

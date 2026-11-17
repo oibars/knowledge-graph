@@ -80,3 +80,88 @@ def test_stats_shape(server):
 
 def test_main_entry_point_exists(server):
     assert callable(server.main), "kg-mcp console script requires main()"
+
+
+def test_default_recall_excludes_reference_and_returns_provenance(server):
+    from knowledge_graph.models import Entity
+    server.store.add_entity(Entity(id="news", label="Document", name="Pricing news", source_app="swiftrecap"))
+    server.store.add_entity(Entity(id="decision", label="Decision", name="Pricing decision", source_app="fieldy",
+                                   source_url="fieldy://recording", properties={"domain": "professional", "export_policy": "local_only",
+                                   "evidence": [{"source_id": "recording", "quote": "We agreed on pricing"}]}))
+    hits = server.kg_search("pricing")
+    assert [h["id"] for h in hits] == ["decision"]
+    assert hits[0]["source_url"] == "fieldy://recording"
+    assert hits[0]["domain"] == "professional"
+    assert hits[0]["export_allowed"] is False
+    assert hits[0]["properties"]["evidence"]
+    assert {h["id"] for h in server.kg_search("pricing", corpus="all")} == {"decision", "news"}
+
+
+def test_action_recall_requires_evidence_and_filters_owner_status(server):
+    from knowledge_graph.models import Entity
+    for eid, props in [("grounded", {"owner": "Oscar", "status": "open", "evidence": [{"source_id": "meeting", "quote": "I will send it"}]}),
+                       ("unsupported", {"owner": "Oscar", "status": "open"}),
+                       ("other", {"owner": "Someone", "status": "open", "evidence": [{"source_id": "meeting", "quote": "I will send it"}]})]:
+        server.store.add_entity(Entity(id=eid, label="Task", name="Send proposal", properties=props))
+    hits = server.kg_recall_actions("proposal", owner="Oscar", status="open")
+    assert [h["id"] for h in hits] == ["grounded"]
+    assert hits[0]["properties"]["owner"] == "Oscar"
+    assert server.kg_recall_actions(owner="Oscar", status="done") == []
+
+
+def test_export_only_connector_exposes_only_approved_facts(server, monkeypatch):
+    from knowledge_graph.models import Entity
+    from knowledge_graph.privacy import approve_export
+    for eid in ("safe", "private"):
+        e = Entity(id=eid, label="Concept", name=f"Pricing {eid}", description="Selected fact" if eid == "safe" else "PRIVATE_SENTINEL",
+                   properties={"domain": "professional"})
+        if eid == "safe": approve_export(e)
+        server.store.add_entity(e)
+    monkeypatch.setenv("KG_EXPORT_ONLY", "1")
+    assert [h["id"] for h in server.kg_search("pricing")] == ["safe"]
+    assert server.kg_get_entity("safe")["export_allowed"] is True
+    assert server.kg_get_entity("private")["policy_blocked"] is True
+    assert all(h["id"] == "safe" for h in server.kg_recent())
+    assert server.kg_policy()["read_mode"] == "approved_exports"
+    with pytest.raises(PermissionError, match="read-only"):
+        server.kg_add_entity("Concept", "Forbidden mutation")
+    with pytest.raises(PermissionError, match="read-only"):
+        server.kg_update_entity("safe", properties={"export_policy": "approved"})
+    with pytest.raises(PermissionError, match="read-only"):
+        server.kg_delete_entity("private")
+
+
+def test_export_only_traversal_cannot_cross_unapproved_nodes(server, monkeypatch):
+    from knowledge_graph.models import Entity, Relation
+    from knowledge_graph.privacy import approve_export
+    for eid in ("a", "private", "b"):
+        e = Entity(id=eid, label="Concept", name=f"Node {eid}", properties={"domain": "professional"})
+        if eid != "private": approve_export(e)
+        server.store.add_entity(e)
+    for start, end in (("a", "private"), ("private", "b")):
+        server.store.add_relation(Relation(id=f"{start}-{end}", source_id=start, target_id=end,
+                                          relation_type="references", connection_reason="PRIVATE_REASON"))
+    monkeypatch.setenv("KG_EXPORT_ONLY", "1")
+    assert server.kg_get_neighbors("a", depth=3) == {"1": [], "2": [], "3": []}
+    assert server.kg_find_path("a", "b") is None
+    assert server.kg_get_relations("a") == []
+    server.store.add_relation(Relation(id="PRIVATE_RELATION_ID", source_id="a", target_id="b", relation_type="references",
+                                      connection_reason="PRIVATE_REASON"))
+    assert [h["id"] for h in server.kg_find_path("a", "b")] == ["a", "b"]
+    assert "PRIVATE_REASON" not in str(server.kg_get_relations("a"))
+    assert "PRIVATE_RELATION_ID" not in str(server.kg_get_relations("a"))
+
+
+def test_export_only_omits_unbound_derived_and_approval_metadata(server, monkeypatch):
+    from knowledge_graph.privacy import approve_export
+    from knowledge_graph.models import Entity
+    store = server.store
+    monkeypatch.setenv("KG_EXPORT_ONLY", "1")
+    entity = Entity(id="approved", label="Decision", name="Work fact", description="Use option A", properties={"domain": "professional"})
+    approve_export(entity)
+    entity.properties.update(embedding_model="PRIVATE", approved_by="PRIVATE", embedding_status="PRIVATE")
+    store.add_entity(entity)
+    hit = server.kg_get_entity(entity.id)
+    assert hit["export_allowed"]
+    assert "updated_at" not in hit and "access_count" not in hit and "importance_score" not in hit
+    assert not {"embedding_model", "approved_by", "embedding_status", "approved_export_hash"} & hit["properties"].keys()

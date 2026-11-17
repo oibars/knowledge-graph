@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.0",
     "fastapi>=0.115.0",
     "mcp>=1.6.0",
+    "jsonschema>=4.0",
     # Ollama used via stdlib urllib — no extra package needed
 ]
 

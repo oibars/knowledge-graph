@@ -29,13 +29,38 @@ def linker_with_llm(store):
     return SemanticLinker(store, llm_client=mock_client, use_ollama=False)
 
 
+def test_related_tasks_compare_latest_embedding_aliases(store, linker):
+    linker.similarity_threshold = .4
+    for entity_id, model in (("t1", "embeddinggemma"), ("t2", "embeddinggemma:latest")):
+        store.add_entity(Entity(id=entity_id, label="Task", name=entity_id, embedding=[1., 0.],
+                                properties={"embedding_model": model}))
+    assert linker.link_related_tasks("t1")
+
+
+def test_linker_routine_generation_disables_thinking(tmp_path, monkeypatch):
+    from knowledge_graph.services import linker
+    monkeypatch.setenv("JARVIS_LOCK_DIR", str(tmp_path))
+    requests = []
+    def local(path, payload, url, timeout):
+        requests.append(payload)
+        return {"response": "concept"}
+    monkeypatch.setattr(linker, "local_json", local)
+    monkeypatch.setenv("JARVIS_LOCAL_THINK", "1")
+    assert linker._ollama_generate("synthetic") == "concept"
+    assert requests[0]["think"] is False
+
+
 class TestExtractConcepts:
     def test_no_llm_returns_empty(self, linker):
         result = linker._extract_concepts_from_text("Some important text about caching")
         assert result == []
 
     def test_with_mock_llm_returns_concepts(self, linker_with_llm):
-        result = linker_with_llm._extract_concepts_from_text("Text about auth and sessions")
+        from knowledge_graph.privacy import approve_export
+        source = Entity(id="approved", label="File", name="Approved", description="Text about auth and sessions",
+                        properties={"domain": "professional"})
+        approve_export(source)
+        result = linker_with_llm._extract_concepts_from_text(source.description, source_entity=source)
         assert "authentication" in result
         assert "JWT" in result
         assert "session management" in result
@@ -57,8 +82,10 @@ class TestLinkFileToConcepts:
         assert relations == []
 
     def test_extract_concepts_creates_entities_and_relations(self, store, linker_with_llm):
+        from knowledge_graph.privacy import approve_export
         file_entity = Entity(id="f1", label="File", name="auth.py",
-                              description="JWT authentication module")
+                              description="JWT authentication module", properties={"domain": "professional"})
+        approve_export(file_entity)
         store.add_entity(file_entity)
         relations = linker_with_llm.link_file_to_concepts("f1", extract_concepts=True)
 
@@ -116,3 +143,50 @@ class TestSuggestConnections:
 
     def test_nonexistent_entity_returns_empty(self, linker):
         assert linker.suggest_connections("ghost") == []
+
+
+def test_unapproved_personal_and_unknown_cannot_reach_cloud(store):
+    client = MagicMock()
+    linker = SemanticLinker(store, llm_client=client, use_ollama=False)
+    for domain in ("personal", "unknown", "professional", "mixed"):
+        source = Entity(id=domain, label="File", name="sentinel", description="PRIVATE_SENTINEL",
+                        properties={"domain": domain})
+        store.add_entity(source)
+        assert linker.link_file_to_concepts(domain) == []
+    assert linker._extract_concepts_from_text("PRIVATE_SENTINEL") == []
+    client.messages.create.assert_not_called()
+
+
+def test_cloud_requires_matching_approved_source_text(store):
+    from knowledge_graph.privacy import approve_export
+    client = MagicMock()
+    source = Entity(id="source", label="File", name="Selected fact", description="Approved source text",
+                    properties={"domain": "professional"})
+    approve_export(source)
+    linker = SemanticLinker(store, llm_client=client, use_ollama=False)
+    assert linker._extract_concepts_from_text("PRIVATE_SENTINEL", source_entity=source) == []
+    client.messages.create.assert_not_called()
+
+
+def test_ollama_helpers_refuse_remote_endpoint(monkeypatch):
+    from knowledge_graph.services.linker import _ollama_embed, _ollama_generate
+    import urllib.request
+    calls = []
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: calls.append(args))
+    assert _ollama_embed("PRIVATE", base_url="https://example.invalid") is None
+    assert _ollama_generate("PRIVATE", base_url="https://example.invalid") is None
+    assert calls == []
+
+
+def test_local_concept_extraction_works_without_cloud_client(store, monkeypatch):
+    from knowledge_graph.services import linker as module
+    store.add_entity(Entity(id="f", label="File", name="module", description="Caching design",
+                           properties={"domain": "professional"}))
+    monkeypatch.setattr(module, "_ollama_generate", lambda *args: "Caching")
+    monkeypatch.setattr(module, "_ollama_embed", lambda *args: [1., 0.])
+    linker = SemanticLinker(store, use_ollama=True)
+    assert len(linker.link_file_to_concepts("f")) == 1
+    concept = store.find_by_label("Concept")[0]
+    assert concept.properties["domain"] == "professional"
+    assert concept.properties["export_policy"] == "local_only"
+    assert concept.properties["parent_id"] == "f"

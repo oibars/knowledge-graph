@@ -17,7 +17,7 @@ from pathlib import Path
 import structlog
 
 from knowledge_graph.models import Entity
-from knowledge_graph.services.graph_store import KnowledgeGraphStore
+from knowledge_graph.services.graph_store import KnowledgeGraphStore, canonical_embedding_model
 from knowledge_graph.services.linker import _ollama_embed, _OLLAMA_EMBED_MODEL, _OLLAMA_URL
 
 logger = structlog.get_logger()
@@ -49,6 +49,7 @@ def index_agents(
     dry_run: bool = False,
     generate_embeddings: bool = True,
     force: bool = False,
+    prune_stale: bool = False,
 ) -> tuple[int, int]:
     """Index all agent .md files from agents_dir into the knowledge graph.
 
@@ -129,12 +130,24 @@ def index_agents(
             is_auto_generated=True,
             content_hash=content_hash,
             embedding=embedding,
+            properties={"embedding_model": canonical_embedding_model(_OLLAMA_EMBED_MODEL)} if embedding else {},
         )
 
         store.add_entity(entity)
         embed_status = "embedded" if embedding else "no-embedding"
         logger.info("Indexed agent", id=entity_id, name=name, category=category_tag, embedding=embed_status)
         added += 1
+
+    if prune_stale and not dry_run:
+        live_ids = {f"agent-{md_file.stem}" for md_file in agent_files}
+        stale_ids = [
+            entity_id
+            for entity_id, entity in store._entities.items()
+            if entity.label == "Agent" and entity_id not in live_ids
+        ]
+        for entity_id in stale_ids:
+            store.delete_entity(entity_id)
+        logger.info("Pruned stale agents", count=len(stale_ids))
 
     return added, skipped
 
@@ -162,6 +175,11 @@ def main() -> None:
         action="store_true",
         help="Re-index all agents even if content hash is unchanged (useful to regenerate embeddings)",
     )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Remove indexed Agent entities whose files are no longer in the agents directory",
+    )
     args = parser.parse_args()
 
     print(f"Scanning: {args.agents_dir}")
@@ -170,6 +188,7 @@ def main() -> None:
         dry_run=args.dry_run,
         generate_embeddings=not args.no_embeddings,
         force=args.force,
+        prune_stale=args.prune,
     )
     print(f"Done — added: {added}, skipped: {skipped}")
 

@@ -5,11 +5,11 @@
 [![python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 [![mcp](https://img.shields.io/badge/MCP-native-orange)](https://modelcontextprotocol.io)
 
-Local-first, MCP-native knowledge graph that turns your bookmarks, saves, and reads into a graph your AI agent queries as a tool. Not a notebook you maintain.
+Local-first memory and retrieval for recordings, commitments, decisions, saved sources and agent context. SQLite holds the canonical graph; local search returns source evidence through MCP.
 
-**Obsidian assumes you write notes. This doesn't.** Your firehose of saved content (Chrome bookmarks, Reddit saves, YouTube likes, Instagram saves, manually captured articles) becomes the corpus. Grok Build, Claude Code, Cursor, or any MCP client gets that context as tools.
+The core does not require cloud inference. Local Ollama embeddings improve retrieval when available; lexical search remains available when the model is offline. Personal and professional stores remain separate, and news/research feeds use a reference corpus so they do not crowd out your own memory.
 
-What it gives you. Local-first execution that runs on your machine with no cloud, no login, no telemetry. MCP-native tooling that exposes `kg_search`, `kg_add_entity`, `kg_get_neighbors` and 10 more tools so AI agents reach for it. No notes required because the ingest pipeline does the work and you keep saving things normally. **Hybrid retrieval**: tokenized lexical search blended with local semantic similarity (Ollama embeddings, when available), importance, and recency — degrading gracefully to lexical-only when Ollama is down. Deterministic relevance scoring at ingest time from a lexical interest profile built from your own files and graph entities, with no LLM call needed. Built for concurrent use: a long-running MCP server and cron ingesters can share the same database safely (WAL journaling), and the server picks up external writes without a restart.
+Cloud clients use `KG_EXPORT_ONLY=1` to receive selected, content-bound approved facts through a read-only connector. A trusted local client can use full local recall. Domain classification alone never grants cloud or publication permission. See [memory architecture](docs/memory-architecture.md) for identity, export boundaries and compatibility limits.
 
 ## Quickstart
 
@@ -50,7 +50,7 @@ Restart the client. `kg_search`, `kg_recent`, `kg_get_neighbors`, and the rest a
 | Instagram saved posts/reels | Meta data export ZIP | working |
 | Article / PDF / podcast / paper | manual capture via skill or template | working |
 
-Every item lands as `Entity(label="Document")` with an `importance_score` (0.0 to 1.0) and a `signal-high | signal-medium | signal-low` tag. Re-runs are idempotent (content_hash dedup).
+Saved items land as `Entity(label="Document")` with an importance score and signal tag. Source-backed items preserve stable source IDs; unanchored semantic entities can deduplicate by scoped content identity.
 
 ## Install
 
@@ -69,14 +69,16 @@ Requires Python ≥ 3.11.
 kg-mcp
 ```
 
-Point your MCP client at that command (see Quickstart). Two stores is a common setup: one professional graph, one personal. Each process needs its own `KG_DATA_DIR`.
+For a cloud client, set `KG_EXPORT_ONLY=1` in the server environment. Use an unrestricted server only with a trusted local client. Two stores is a common setup: one professional graph, one personal. Each process needs its own `KG_DATA_DIR`.
 
 ### Available MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `kg_search` | Hybrid search (lexical + semantic + importance + recency); filters: `label`, `tags`, `source_app`, `created_after`/`created_before` |
-| `kg_recent` | Entities created in the last N days, newest first — no query string. Use for "what changed" |
+| `kg_search` | Hybrid retrieval; label, tags, source, date and corpus filters. Defaults to memory |
+| `kg_recent` | Entities created in the last N days, newest first; defaults to memory |
+| `kg_recall_actions` | Source-linked Task/Decision recall; owner, status, source and date filters |
+| `kg_policy` | Active connector read/write boundary and export policy |
 | `kg_get_entity` | Retrieve an entity by id |
 | `kg_get_neighbors` | Neighbors at depth 1 to 3, optionally filtered by `relation_type` |
 | `kg_find_path` | Shortest path between two entities |
@@ -84,7 +86,7 @@ Point your MCP client at that command (see Quickstart). Two stores is a common s
 | `kg_find_by_tag` | List entities carrying a tag, ranked by importance |
 | `kg_find_similar` | Semantically similar entities via stored embeddings |
 | `kg_get_stats` | Graph statistics |
-| `kg_add_entity` | Create entity (content-identical adds dedupe to the existing id) |
+| `kg_add_entity` | Create or upsert; accepts a stable `entity_id` and source provenance |
 | `kg_add_entities` | Bulk add in one call |
 | `kg_add_relation` | Link two entities (relation type validated) |
 | `kg_update_entity` | Update fields |
@@ -92,10 +94,11 @@ Point your MCP client at that command (see Quickstart). Two stores is a common s
 
 ### Reliability
 
-- **Safe under concurrency** — every connection uses WAL + busy timeouts; the MCP server detects external writes (cron ingesters) and reloads automatically, so it never serves stale answers.
-- **Upsert by content** — entities carry a `content_hash`; re-adding identical name+description returns the existing entity instead of minting a duplicate.
-- **Validated relations** — `relation_type` is checked against the vocabulary; bidirectional relations persist their inverse edge (it survives restarts).
+- **Canonical SQLite state** — mutation and identity decisions use serialized transactions; caches refresh on external SQLite commits.
+- **Source identity** — occurrences and source-backed entities preserve stable IDs. Scoped content dedup applies to unanchored semantic entities; edits recompute content hashes.
+- **Typed multigraph** — independent relation IDs preserve multiple edges per pair. Bidirectional pairs commit and delete atomically.
 - **Auto-snapshots** — JSON snapshots every 50 writes / 24h with rotation (`KG_SNAPSHOT_DIR` relocates them). Snapshots are a second line of defense: still back up the data dir itself.
+- **UTC recall** — storage and search normalize timestamps to aware UTC; legacy naive dates keep their host-local meaning. Entity lexical fields are cached per graph with mutation checks. See the [synthetic recall benchmark](docs/recall-benchmark-2026-10-05.md) for measurements and limits.
 
 ## Ingest your saves
 
@@ -170,7 +173,7 @@ store.add_entity(trend_entity(item, source="mynewsfeed"))
 
 `trend_entity` sets `created_at` to ingest time. The feed's `publishedAt` is stored on `properties` so a midnight or future publish date cannot reappear in every 24h window.
 
-Both paths get stable ids, domain stamping, and content-hash dedup for free — re-runs are idempotent.
+Both paths use stable source IDs and stamp domain, corpus and a denied export policy. Distinct recordings remain distinct even when text repeats. Legacy conversation descriptions retain a 2,000-character local projection; use `CaptureArchive` for durable raw revisions, validated extraction and full source chunks.
 
 ## Capture a single source (article, PDF, podcast)
 
@@ -197,7 +200,7 @@ kg_search("debug a production memory leak", label="Agent")
 → engineering-incident-response-commander, engineering-sre, testing-evidence-collector
 ```
 
-Agent indexing and the optional `SemanticLinker` embed text with a local Ollama model (`nomic-embed-text` by default). Pin `OLLAMA_EMBED_MODEL` to whatever you used at write time — mixed vector spaces are skipped. `embeddinggemma` is a common fleet-wide choice. No cloud key needed. If Ollama isn't running, indexing still works — it skips embeddings and falls back to lexical search.
+Agent indexing and the optional `SemanticLinker` embed text with a local Ollama model (`embeddinggemma:latest` by default). Pin `OLLAMA_EMBED_MODEL` to whatever you used at write time — mixed vector spaces are skipped; an untagged model name is equivalent to its `:latest` alias. No cloud key needed. If Ollama isn't running, indexing still works — it skips embeddings and falls back to lexical search.
 
 ## Python API
 
@@ -217,7 +220,7 @@ neighbors = store.get_neighbors("e1", depth=2)
 
 ## Entity labels
 
-`Concept` `Document` `Person` `Tag` `File` `Folder` `Agent` `Skill` `Tool` `Decision` `Task` `Bug` `Session` `AgentOutput` `Experiment` `Code` `Event`
+`Concept` `Document` `Chunk` `Person` `Tag` `File` `Folder` `Agent` `Skill` `Tool` `Decision` `Task` `Bug` `Session` `AgentOutput` `Experiment` `Code` `Event`
 
 ## Relation types
 
@@ -228,15 +231,20 @@ neighbors = store.get_neighbors("e1", depth=2)
 | Env var | Default | Purpose |
 |---|---|---|
 | `KG_DATA_DIR` | `~/.knowledge-graph/data` | SQLite + snapshot storage |
+| `KG_EXPORT_ONLY` | `0` | Set `1` for cloud-connected MCP: approved facts only, read-only |
 | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | (none) | Reddit script app credentials |
 | `REDDIT_REFRESH_TOKEN` | (none) | preferred over username/password |
 | `REDDIT_USERNAME` / `REDDIT_PASSWORD` | (none) | password-grant fallback |
 | `YOUTUBE_OAUTH_CLIENT_PATH` | `~/.config/google/youtube_oauth_client.json` | YouTube OAuth client |
 | `YOUTUBE_OAUTH_TOKEN_PATH` | `~/.config/google/youtube_token.json` | cached refresh token |
 | `YOUTUBE_PLAYLIST_PREFIX` | (none) | also ingest user playlists with this title prefix |
-| `OLLAMA_URL` | `http://localhost:11434` | local Ollama endpoint for semantic search, agent indexing, and linking |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | embedding model — **must match the model that embedded your stored entities**; mixed vector spaces are skipped via a dimension guard |
-| `OLLAMA_CHAT_MODEL` | `gemma4:e4b` | chat model for concept extraction in `SemanticLinker` |
+| `OLLAMA_URL` | `http://localhost:11434` | loopback HTTP endpoint for search, indexing and linking; proxies and redirects disabled |
+| `OLLAMA_EMBED_MODEL` | `embeddinggemma:latest` | embedding model — **must match the model that embedded your stored entities**; untagged names alias `:latest`; known model mismatches and incompatible dimensions are skipped |
+| `OLLAMA_CHAT_MODEL` | configured recall model, then `jarvis-recall:qwen3.5-9b` | chat model for concept extraction in `SemanticLinker` |
+| `JARVIS_RECALL_MODEL` | `jarvis-recall:qwen3.5-9b` | local recall model; also the default for daily brief synthesis |
+| `JARVIS_EXTRACTION_MODEL` | `jarvis-extract:gemma4-12b` | local structured capture extraction model |
+| `JARVIS_LOCAL_MODEL` | unset | explicit override for both local generation roles |
+| `JARVIS_BRIEF_MODEL` | configured recall model | explicit daily brief model override |
 | `KG_SNAPSHOT_DIR` | `<data_dir>/kg_snapshots` | relocate auto-snapshots (e.g. into a backup folder) |
 | `KG_MEMORY_DIR` | newest `~/.claude/projects/*/memory` | memory-files source for the interest profile |
 

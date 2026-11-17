@@ -8,11 +8,12 @@ Supports two backends (configured via constructor or environment variables):
 
 Environment variables (all optional):
   OLLAMA_URL          Ollama base URL (default: http://localhost:11434)
-  OLLAMA_EMBED_MODEL  Embedding model (default: nomic-embed-text)
-  OLLAMA_CHAT_MODEL   Chat model for concept extraction (default: gemma4:e4b)
+  OLLAMA_EMBED_MODEL  Embedding model (default: embeddinggemma:latest)
+  OLLAMA_CHAT_MODEL   Chat model for concept extraction (default: the configured local recall model)
 """
 
 import json
+import hashlib
 import os
 import urllib.error
 import urllib.request
@@ -23,27 +24,24 @@ from datetime import datetime
 import structlog
 
 from knowledge_graph.models import Entity, Relation, RELATION_TYPES
+from knowledge_graph.local_llm import resolve_local_model
+from knowledge_graph.privacy import export_allowed
+from knowledge_graph.local_transport import local_json, loopback_url, local_generation_slot
+from knowledge_graph.services.graph_store import entity_corpus, canonical_embedding_model
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
 
 logger = structlog.get_logger()
 
 _OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-_OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-_OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "gemma4:e4b")
+_OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "embeddinggemma:latest")
+_OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL") or resolve_local_model()
 
 
 def _ollama_embed(text: str, model: str = _OLLAMA_EMBED_MODEL, base_url: str = _OLLAMA_URL) -> Optional[List[float]]:
     """Generate an embedding via Ollama. Returns None if Ollama is unreachable."""
     try:
-        payload = json.dumps({"model": model, "prompt": text}).encode()
-        req = urllib.request.Request(
-            f"{base_url}/api/embeddings",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())["embedding"]
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError) as e:
+        return local_json("/api/embeddings", {"model": model, "prompt": text}, base_url, timeout=30)["embedding"]
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Ollama embedding failed", model=model, error=str(e))
         return None
 
@@ -51,15 +49,12 @@ def _ollama_embed(text: str, model: str = _OLLAMA_EMBED_MODEL, base_url: str = _
 def _ollama_generate(prompt: str, model: str = _OLLAMA_CHAT_MODEL, base_url: str = _OLLAMA_URL) -> Optional[str]:
     """Run a one-shot generation via Ollama. Returns None if Ollama is unreachable."""
     try:
-        payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode()
-        req = urllib.request.Request(
-            f"{base_url}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read()).get("response", "").strip()
-    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        loopback_url(base_url)  # Validate before creating the local queue file.
+        with local_generation_slot(timeout=60) as remaining:
+            return local_json("/api/generate", {"model": model, "prompt": prompt, "stream": False, "keep_alive": "2m", "think": False,
+                                               "options": {"num_ctx": 16384, "num_predict": 256, "temperature": 0}},
+                              base_url, timeout=remaining).get("response", "").strip()
+    except (urllib.error.URLError, json.JSONDecodeError, ValueError, TypeError, TimeoutError) as e:
         logger.warning("Ollama generate failed", model=model, error=str(e))
         return None
 
@@ -93,20 +88,24 @@ class SemanticLinker:
         self.ollama_embed_model = ollama_embed_model
         self.ollama_chat_model = ollama_chat_model
         self.use_ollama = use_ollama
+        self._last_embedding_model = None
 
     def _compute_embedding(self, text: str) -> Optional[List[float]]:
         """Compute embedding. Tries Ollama first, then sentence-transformers."""
+        self._last_embedding_model = None
         if self.use_ollama:
             emb = _ollama_embed(text, self.ollama_embed_model, self.ollama_url)
             if emb is not None:
+                self._last_embedding_model = self.ollama_embed_model
                 return emb
 
         if self.embedding_model:
             try:
                 embedding = self.embedding_model.encode(text)
+                self._last_embedding_model = getattr(self.embedding_model, "model_name_or_path", "sentence-transformers-unspecified")
                 return embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
             except Exception as e:
-                logger.error("sentence-transformers embedding failed", text=text[:50], error=str(e))
+                logger.error("sentence-transformers embedding failed", error_type=type(e).__name__)
 
         return None
     
@@ -160,26 +159,36 @@ class SemanticLinker:
                     relations.append(relation)
         
         # Extract and link new concepts if LLM available
-        if extract_concepts and self.llm_client and file_entity.description:
-            concepts = self._extract_concepts_from_text(file_entity.description)
+        if extract_concepts and (self.use_ollama or self.llm_client) and file_entity.description:
+            concepts = self._extract_concepts_from_text(file_entity.description, source_entity=file_entity)
             for concept_name in concepts:
                 # Check if concept already exists
-                existing = self.graph.search_entities(concept_name, label="Concept", limit=1)
+                existing = [e for e in self.graph.search_entities(concept_name, label="Concept", limit=10, semantic=False)
+                            if e.name.casefold() == concept_name.casefold()
+                            and e.properties.get("domain", "unknown") == file_entity.properties.get("domain", "unknown")
+                            and entity_corpus(e) == entity_corpus(file_entity)]
                 
                 if existing:
                     concept_entity = existing[0]
                 else:
                     # Create new concept entity
-                    concept_id = f"concept_{concept_name.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    concept_embedding = self._compute_embedding(concept_name)
+                    concept_id = "concept-" + hashlib.sha256(f"{file_entity.id}:{concept_name.casefold()}".encode()).hexdigest()[:16]
+                    concept_description = f"Concept extracted from {file_entity.name}"
+                    concept_embedding = self._compute_embedding(f"{concept_name}: {concept_description}")
                     
                     concept_entity = Entity(
                         id=concept_id,
                         label="Concept",
                         name=concept_name,
-                        description=f"Concept extracted from {file_entity.name}",
+                        description=concept_description,
                         embedding=concept_embedding,
                         source_file_path=file_entity.source_file_path,
+                        source_url=file_entity.source_url,
+                        source_app=file_entity.source_app,
+                        properties={"domain": file_entity.properties.get("domain", "unknown"),
+                                    "corpus": entity_corpus(file_entity), "export_policy": "local_only",
+                                    "export_permissions": [], "parent_id": file_entity.id,
+                                    **({"embedding_model": self._last_embedding_model} if concept_embedding else {})},
                         is_auto_generated=True
                     )
                     self.graph.add_entity(concept_entity)
@@ -205,8 +214,8 @@ class SemanticLinker:
         )
         return relations
     
-    def _extract_concepts_from_text(self, text: str) -> List[str]:
-        """Extract key concepts. Tries Ollama (local) first, then Anthropic API fallback."""
+    def _extract_concepts_from_text(self, text: str, source_entity: Optional[Entity] = None) -> List[str]:
+        """Local extraction; cloud fallback requires the matching approved source."""
         prompt = (
             "Extract 3-5 key concepts from the text below. "
             "Return ONLY a comma-separated list of concept names, nothing else.\n\n"
@@ -222,7 +231,7 @@ class SemanticLinker:
                     return concepts
 
         # 2. Fallback: Anthropic API (requires llm_client)
-        if self.llm_client:
+        if self.llm_client and source_entity is not None and text == source_entity.description and export_allowed(source_entity):
             try:
                 response = self.llm_client.messages.create(
                     model="claude-haiku-4-5-20251001",
@@ -232,7 +241,7 @@ class SemanticLinker:
                 raw = response.content[0].text.strip()
                 return [c.strip() for c in raw.split(",") if c.strip()]
             except Exception as e:
-                logger.error("Failed to extract concepts via Anthropic API", error=str(e))
+                logger.error("Failed to extract concepts via Anthropic API", error_type=type(e).__name__)
 
         return []
     
@@ -268,7 +277,9 @@ class SemanticLinker:
                     similarity += len(common_tags) * 0.2
             
             # Embedding similarity
-            if task_entity.embedding and other_task.embedding:
+            if (task_entity.embedding and other_task.embedding
+                    and len(task_entity.embedding) == len(other_task.embedding)
+                    and canonical_embedding_model(task_entity.properties.get("embedding_model") or "") == canonical_embedding_model(other_task.properties.get("embedding_model") or "")):
                 embedding_sim = self._cosine_similarity(
                     task_entity.embedding,
                     other_task.embedding
@@ -524,14 +535,14 @@ class SemanticLinker:
         text_parts = [entity.name]
         if entity.description:
             text_parts.append(entity.description)
-        if entity.tags:
-            text_parts.extend(entity.tags)
         
         text = " ".join(text_parts)
         
         embedding = self._compute_embedding(text)
         if embedding:
             entity.embedding = embedding
+            entity.properties["embedding_model"] = self._last_embedding_model
+            entity.properties["embedding_content_hash"] = entity.compute_content_hash()
             self.graph.update_entity(entity)
             return True
         

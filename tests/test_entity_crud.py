@@ -46,6 +46,24 @@ class TestAddAndGet:
         assert store.get_entity("e1").name == "Updated Name"
         assert len(store.get_all_entities()) == 1
 
+    def test_upsert_preserves_created_at(self, store):
+        from datetime import datetime, timedelta
+
+        born = datetime(2026, 7, 1, 8, 0, 0)
+        store.add_entity(make_entity(id="e1", created_at=born, description="v1"))
+        store.add_entity(make_entity(id="e1", name="Updated Name", description="v2"))
+        got = store.get_entity("e1")
+        assert got.name == "Updated Name"
+        assert got.description == "v2"
+        from knowledge_graph.models.timestamps import as_utc
+        assert got.created_at == as_utc(born)
+
+    def test_upsert_preserves_embedding_when_incoming_empty(self, store):
+        vec = [0.1] * 8
+        store.add_entity(make_entity(id="e1", embedding=vec, description="v1"))
+        store.add_entity(make_entity(id="e1", embedding=None, description="v1"))
+        assert store.get_entity("e1").embedding == vec
+
     def test_all_entity_labels_accepted(self, store):
         for i, label in enumerate(ENTITY_LABELS.keys()):
             e = Entity(id=f"e-{i}", label=label, name=f"Entity {i}")

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from knowledge_graph.models import Entity
+from knowledge_graph.models.timestamps import as_utc, utc_now
 from knowledge_graph.services.graph_store import KnowledgeGraphStore
 
 # Scope config: the ONLY thing that differs between the professional and
@@ -38,6 +39,7 @@ def store_for(scope: str) -> KnowledgeGraphStore:
     return KnowledgeGraphStore()
 
 
+
 def conversation_entity(
     source: str,
     record: dict,
@@ -45,27 +47,51 @@ def conversation_entity(
     importance: Optional[float] = None,
 ) -> Entity:
     """Build the canonical conversation/event Entity from a staging record."""
+    if scope not in SCOPES:
+        raise ValueError("scope must be professional or personal")
+    raw_date = record.get("date") or record.get("created_at")
     try:
-        created = datetime.fromisoformat((record.get("date") or "2024-01-01")[:19])
-    except ValueError:
-        created = datetime.now()
+        occurred = as_utc(datetime.fromisoformat(str(raw_date))) if raw_date else None
+        timestamp_status = "valid" if occurred else "missing"
+    except (ValueError, TypeError):
+        occurred = None
+        timestamp_status = "invalid"
+    created = occurred or utc_now()
     topics = record.get("topics") or []
-    domain = "professional" if scope == "professional" else "personal"
+    domain = record.get("domain", scope)
+    domain = "professional" if domain == "business" else domain
+    if domain not in {"professional", "personal", "mixed", "unknown"}:
+        domain = "unknown"
+    # Legacy staging remains a local projection. The durable capture archive is
+    # authoritative; full transcripts and approved fact slices use capture.py.
+    text = record.get("transcript") or record.get("text") or ""
+    if not isinstance(text, str):
+        raise ValueError("Staging transcript/text must be a string")
     return Entity(
         id=f"conv-{source}-{record['id']}",
         label="Event",
         name=record.get("title") or "Untitled",
-        description=(record.get("text") or "")[:2000],
+        description=text[:2000],
         source_app=source,
-        source_url=f"{source}://{record['id']}",
+        source_url=record.get("source_url") or f"{source}://{record['id']}",
+        source_file_path=record.get("source_file_path"),
         topics=topics,
         tags=[source, "conversation", domain] + topics,
         importance_score=importance if importance is not None else SCOPES[scope]["importance"],
         created_at=created,
         properties={
             "domain": domain,
+            "corpus": "memory",
+            "export_policy": "local_only",
+            "export_permissions": [],
+            "contains_raw": True,
+            "conversation_id": str(record["id"]),
             "speakers": record.get("speakers") or [],
-            "start": record.get("date"),
+            "segments": record.get("segments") or [],
+            "start": raw_date,
+            "occurred_at": occurred.isoformat() if occurred else None,
+            "ingested_at": utc_now().isoformat(),
+            "timestamp_status": timestamp_status,
             "source": source,
         },
     )
@@ -80,16 +106,18 @@ def trend_entity(item: dict, source: str = "swiftrecap", scope: str = "professio
     """
     import hashlib
 
+    if scope not in SCOPES:
+        raise ValueError("scope must be professional or personal")
     url = item["url"]
     published = None
     try:
-        published = datetime.fromisoformat(str(item.get("publishedAt", ""))[:19])
+        published = as_utc(datetime.fromisoformat(str(item.get("publishedAt", ""))))
     except ValueError:
         published = None
     # created_at is ingest time. A feed's publishedAt is often midnight-on-date
     # and can sit in the future; writing it here made every 24h window re-count
     # the item until that calendar day expired.
-    created = datetime.now()
+    created = utc_now()
     category = item.get("category")
     keywords = [k for k in (item.get("keywords") or []) if k][:5]
     topics = [t for t in [category, item.get("topic")] if t] + keywords
@@ -108,6 +136,12 @@ def trend_entity(item: dict, source: str = "swiftrecap", scope: str = "professio
         created_at=created,
         properties={
             "domain": domain,
+            "corpus": "reference",
+            "export_policy": "local_only",
+            "export_permissions": [],
+            "contains_raw": False,
+            "source": source,
+            "ingested_at": created.isoformat(),
             "sourceDomain": item.get("sourceDomain"),
             "sourceTier": item.get("sourceTier"),
             "popularity": popularity,

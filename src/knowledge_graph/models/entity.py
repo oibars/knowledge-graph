@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 
+from .timestamps import as_utc, utc_now
+
 
 # Controlled vocabulary for relation types
 RELATION_TYPES = {
@@ -57,6 +59,7 @@ ENTITY_LABELS = {
     "Skill": "Executable capability",
     "Tool": "MCP tool or external tool",
     "Document": "Text document or note",
+    "Chunk": "Source-linked transcript or document fragment",
     "Code": "Code snippet or module",
     "Event": "Temporal occurrence",
     "Tag": "Categorical label",
@@ -104,8 +107,8 @@ class Entity:
     confidence_score: float = 1.0  # Confidence in entity existence
     
     # Access tracking
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
     last_accessed: Optional[datetime] = None
     access_count: int = 0
 
@@ -118,9 +121,13 @@ class Entity:
     def __post_init__(self):
         """Generate content hash if not provided."""
         if not self.content_hash and (self.name or self.description):
-            content = f"{self.name}:{self.description or ''}"
-            self.content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+            self.content_hash = self.compute_content_hash()
     
+    def compute_content_hash(self) -> str:
+        """Hash current embedding input; never trust a caller's cached hash."""
+        content = f"{self.name}:{self.description or ''}"
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert entity to dictionary for serialization."""
         return {
@@ -138,9 +145,9 @@ class Entity:
             "source_user": self.source_user,
             "importance_score": self.importance_score,
             "confidence_score": self.confidence_score,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "last_accessed": self.last_accessed.isoformat() if self.last_accessed else None,
+            "created_at": as_utc(self.created_at).isoformat(),
+            "updated_at": as_utc(self.updated_at).isoformat(),
+            "last_accessed": as_utc(self.last_accessed).isoformat() if self.last_accessed else None,
             "access_count": self.access_count,
             "content_hash": self.content_hash,
             "is_auto_generated": self.is_auto_generated,
@@ -154,31 +161,31 @@ class Entity:
             if field_name in data and data[field_name]:
                 if isinstance(data[field_name], str):
                     data[field_name] = datetime.fromisoformat(data[field_name])
+                data[field_name] = as_utc(data[field_name])
         
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
     
     def touch(self):
         """Update access metadata."""
-        self.last_accessed = datetime.now()
+        self.last_accessed = utc_now()
         self.access_count += 1
-        self.updated_at = datetime.now()
     
     def add_tag(self, tag: str):
         """Add a tag if not already present."""
         if tag not in self.tags:
             self.tags.append(tag)
-            self.updated_at = datetime.now()
+            self.updated_at = utc_now()
     
     def add_topic(self, topic: str):
         """Add a topic if not already present."""
         if topic not in self.topics:
             self.topics.append(topic)
-            self.updated_at = datetime.now()
+            self.updated_at = utc_now()
     
     def set_property(self, key: str, value: Any):
         """Set a property value."""
         self.properties[key] = value
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
 
 @dataclass
@@ -208,7 +215,7 @@ class Relation:
     
     # Tracking
     is_auto_generated: bool = True
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=utc_now)
     confidence: float = 1.0  # Confidence in relation validity
     
     def to_dict(self) -> Dict[str, Any]:
@@ -223,7 +230,7 @@ class Relation:
             "bidirectional": self.bidirectional,
             "connection_reason": self.connection_reason,
             "is_auto_generated": self.is_auto_generated,
-            "created_at": self.created_at.isoformat(),
+            "created_at": as_utc(self.created_at).isoformat(),
             "confidence": self.confidence,
         }
     
@@ -233,6 +240,7 @@ class Relation:
         if "created_at" in data and data["created_at"]:
             if isinstance(data["created_at"], str):
                 data["created_at"] = datetime.fromisoformat(data["created_at"])
+            data["created_at"] = as_utc(data["created_at"])
         
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
     
